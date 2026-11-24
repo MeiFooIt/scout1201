@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>1201Hub</title>
+  <title>香港童軍九龍第1201旅｜童軍及深資童軍進度管理平台</title>
   <!-- Tailwind CSS -->
   <script src="https://cdn.tailwindcss.com"></script>
   <!-- Font Awesome 6 -->
@@ -176,9 +176,9 @@
 
   <script>
     // =========================================================================
-    // 0. FIREBASE 雲端資料庫設定（完成教學後，將你的 firebaseConfig 貼於下方即可啟用免費雲端同步）
+    // 0. FIREBASE 雲端資料庫設定（已填入九龍第1201旅 scout1201 專案設定）
     // =========================================================================
-    const firebaseConfig = {
+    const FIREBASE_CONFIG = {
       apiKey: "AIzaSyAb5uWvxGOzhzvxschmOP5Q_d5TcDpwbxM",
       authDomain: "scout1201.firebaseapp.com",
       projectId: "scout1201",
@@ -219,7 +219,8 @@
             if (Array.isArray(remote.calendarEvents)) state.calendarEvents = remote.calendarEvents;
             if (Array.isArray(remote.trashMembers)) state.trashMembers = remote.trashMembers;
             try {
-              localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...state, pendingImportEvents: [], editingRankHistory: [] }));
+              const { currentUser, pendingImportEvents, pendingBulkMembers, editingRankHistory, ...safeLocal } = state;
+              localStorage.setItem(STORAGE_KEY, JSON.stringify(safeLocal));
             } catch (e) {}
             isApplyingRemoteSnapshot = false;
             renderApp();
@@ -258,6 +259,7 @@
     // 1. STATIC CONFIGURATION & OFFICIAL 2026 SCOUT / VENTURE TRAINING SCHEME
     // =========================================================================
     const STORAGE_KEY = 'hk_scout_1201_prod_v1';
+    const SESSION_AUTH_KEY = 'hk_scout_1201_session_auth_v1';
 
     // Auto-renew Scout Season every year on October 1st (month index >= 9)
     function getCurrentScoutSeasonStartYear(now = new Date()) {
@@ -1165,6 +1167,7 @@
         calTypeFilter: 'all',
         showHkHolidays: true,
         pendingImportEvents: [],
+        pendingBulkMembers: [],
         editingRankHistory: [],
         expandedBadgeItems: {},
         trashMembers: [],
@@ -1178,30 +1181,61 @@
 
     let state = loadState();
 
+    function saveSessionAuth() {
+      try {
+        if (state.currentUser && state.currentUser.role !== 'guest') {
+          sessionStorage.setItem(SESSION_AUTH_KEY, JSON.stringify(state.currentUser));
+        } else {
+          sessionStorage.removeItem(SESSION_AUTH_KEY);
+        }
+      } catch (err) {}
+    }
+
+    function loadSessionAuth() {
+      try {
+        const raw = sessionStorage.getItem(SESSION_AUTH_KEY);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (parsed && (parsed.role === 'admin' || parsed.role === 'member')) {
+            return parsed;
+          }
+        }
+      } catch (err) {}
+      return { role: 'guest', name: '訪客瀏覽', memberId: null };
+    }
+
     function loadState() {
+      const def = createDefaultState();
+      const sessionUser = loadSessionAuth();
       try {
         const saved = localStorage.getItem(STORAGE_KEY);
         if (saved) {
           const parsed = JSON.parse(saved);
-          const def = createDefaultState();
-          return {
+          const merged = {
             ...def,
             ...parsed,
+            currentUser: sessionUser,
             pendingImportEvents: [],
+            pendingBulkMembers: [],
             editingRankHistory: [],
             expandedBadgeItems: {},
             trashMembers: Array.isArray(parsed.trashMembers) ? parsed.trashMembers : []
           };
+          if (merged.activeTab === 'admin' && sessionUser.role !== 'admin') {
+            merged.activeTab = 'home';
+          }
+          return merged;
         }
       } catch (err) {
         console.warn('LocalStorage load fallback:', err);
       }
-      return createDefaultState();
+      return { ...def, currentUser: sessionUser };
     }
 
     function saveState() {
       try {
-        const toSave = { ...state, pendingImportEvents: [], editingRankHistory: [] };
+        // Never persist login session in localStorage so logout + F5 always stays logged out
+        const { currentUser, pendingImportEvents, pendingBulkMembers, editingRankHistory, ...toSave } = state;
         localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
       } catch (err) {
         console.warn('LocalStorage save failed:', err);
@@ -1485,6 +1519,7 @@
       // First-time login or password reset by admin -> prompt member to set personal password
       if (!m.passHash) {
         state.currentUser = { role: 'member', name: m.name, memberId: m.id };
+        saveSessionAuth();
         if (state.activeTab === 'admin') state.activeTab = 'member';
         saveState();
         renderApp();
@@ -1501,6 +1536,7 @@
       }
 
       state.currentUser = { role: 'member', name: m.name, memberId: m.id };
+      saveSessionAuth();
       closeModal();
       showToast(`歡迎回來，${m.name}！`, 'success');
       if (state.activeTab === 'admin') state.activeTab = 'member';
@@ -1573,6 +1609,7 @@
       const val = inputEl ? inputEl.value.trim() : '';
       if (verifyAdminPassword(val)) {
         state.currentUser = { role: 'admin', name: '管理員', memberId: null };
+        saveSessionAuth();
         state.activeTab = 'admin';
         closeModal();
         showToast('已進入管理模式', 'success');
@@ -1588,7 +1625,9 @@
 
     function logoutToGuest() {
       state.currentUser = { role: 'guest', name: '訪客瀏覽', memberId: null };
+      saveSessionAuth();
       if (state.activeTab === 'admin') state.activeTab = 'home';
+      saveState();
       closeModal();
       showToast('已登出', 'info');
       renderApp();
@@ -1598,6 +1637,7 @@
       const m = state.members.find(x => x.id === memberId);
       if (!m) return;
       state.currentUser = { role: 'member', name: m.name, memberId: m.id };
+      saveSessionAuth();
       closeModal();
       showToast(`歡迎回來，${m.name}！`, 'success');
       if (state.activeTab === 'admin') state.activeTab = 'member';
@@ -1912,6 +1952,74 @@
         </div>
       `;
     }
+
+    function renderScheduleTable(events) {
+      if (events.length === 0) {
+        return `
+          <div class="bg-white rounded-3xl border border-slate-200 p-10 text-center shadow-sm text-xs text-slate-400">
+            暫時未有符合篩選條件嘅集會或活動排程。
+          </div>
+        `;
+      }
+      return `
+        <div class="bg-white rounded-3xl border border-slate-200 shadow-sm overflow-hidden">
+          <div class="overflow-x-auto">
+            <table class="w-full text-left border-collapse text-xs sm:text-sm">
+              <thead>
+                <tr class="bg-slate-50 border-b border-slate-200 text-xs font-extrabold text-slate-600">
+                  <th class="py-3.5 px-4 whitespace-nowrap">日期</th>
+                  <th class="py-3.5 px-4 whitespace-nowrap">類別</th>
+                  <th class="py-3.5 px-4">活動內容</th>
+                  <th class="py-3.5 px-4 whitespace-nowrap">時間</th>
+                  <th class="py-3.5 px-4 whitespace-nowrap">地點</th>
+                  <th class="py-3.5 px-4 text-right whitespace-nowrap">操作</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-slate-100">
+                ${events.map(ev => {
+                  const meta = EVENT_TYPES[ev.type] || EVENT_TYPES.meeting;
+                  const holidayName = state.showHkHolidays !== false ? HK_PUBLIC_HOLIDAYS[ev.date] : null;
+                  return `
+                    <tr class="hover:bg-slate-50/70 transition">
+                      <td class="py-3.5 px-4 whitespace-nowrap">
+                        <div class="font-mono font-extrabold text-slate-900">${ev.date}${ev.endDate ? ' ~ ' + ev.endDate.slice(5) : ''}</div>
+                        <div class="text-[11px] text-slate-400 flex items-center gap-1.5">
+                          <span>${getWeekdayZh(ev.date)}</span>
+                          ${holidayName ? `<span class="px-1.5 py-0.2 rounded-md bg-rose-100 text-rose-700 font-bold text-[10px]">${escapeHtml(holidayName)}</span>` : ''}
+                        </div>
+                      </td>
+                      <td class="py-3.5 px-4 whitespace-nowrap">
+                        <span class="px-2.5 py-0.5 rounded-full text-[11px] font-extrabold ${meta.badgeBg} ${meta.badgeText}">${meta.label}</span>
+                      </td>
+                      <td class="py-3.5 px-4 font-bold text-slate-900">${escapeHtml(ev.title)}</td>
+                      <td class="py-3.5 px-4 text-xs text-slate-600 whitespace-nowrap">${escapeHtml(ev.time)}</td>
+                      <td class="py-3.5 px-4 text-xs text-slate-600 whitespace-nowrap">${escapeHtml(ev.location)}</td>
+                      <td class="py-3.5 px-4 text-right whitespace-nowrap">
+                        <button onclick="openEventDetailModal('${ev.id}')" class="px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-bgca-blueLight hover:text-bgca-blue text-slate-600 text-xs font-bold transition">詳情</button>
+                      </td>
+                    </tr>
+                  `;
+                }).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      `;
+    }
+
+    function setCalViewMode(mode) { state.calViewMode = mode; renderApp(); }
+    function setCalTypeFilter(type) { state.calTypeFilter = type; renderApp(); }
+    function jumpCalToday() {
+      const now = new Date();
+      state.calYear = now.getFullYear();
+      state.calMonth = now.getMonth();
+      renderApp();
+    }
+    function jumpCalYear(y) {
+      state.calYear = y;
+      renderApp();
+    }
+
     function openAddEventModal(prefillDate = '') {
       const defaultDate = prefillDate || new Date().toISOString().slice(0, 10);
       openModal(`
@@ -1981,6 +2089,7 @@
       showToast('已新增至共同行事曆！', 'success');
       renderApp();
     }
+
     function shiftCalMonth(delta) {
       let m = state.calMonth + delta;
       let y = state.calYear;
@@ -2028,73 +2137,6 @@
       state.calendarEvents = state.calendarEvents.filter(x => x.id !== eventId);
       saveState();
       showToast('已刪除該項行事曆活動', 'info');
-      renderApp();
-    }
-
-    function openAddEventModal() {
-      openModal(`
-        <div class="p-6">
-          <div class="flex items-center justify-between mb-4">
-            <h3 class="text-lg font-black text-slate-900">手動新增行事曆活動</h3>
-            <button onclick="closeModal()" class="w-8 h-8 rounded-full hover:bg-slate-100 flex items-center justify-center text-slate-400"><i class="fa-solid fa-xmark"></i></button>
-          </div>
-          <form onsubmit="saveNewCalendarEvent(event)" class="space-y-3.5">
-            <div>
-              <label class="block text-xs font-bold text-slate-700 mb-1">活動名稱 *</label>
-              <input id="ev-title" required type="text" placeholder="例如：春季兩日一夜露營" class="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm" />
-            </div>
-            <div class="grid grid-cols-2 gap-3">
-              <div>
-                <label class="block text-xs font-bold text-slate-700 mb-1">開始日期 *</label>
-                <input id="ev-date" required type="date" value="2027-03-13" class="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm" />
-              </div>
-              <div>
-                <label class="block text-xs font-bold text-slate-700 mb-1">結束日期（單日留空）</label>
-                <input id="ev-enddate" type="date" class="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm" />
-              </div>
-            </div>
-            <div class="grid grid-cols-2 gap-3">
-              <div>
-                <label class="block text-xs font-bold text-slate-700 mb-1">時間</label>
-                <input id="ev-time" type="text" value="下午 2:30 - 4:30" class="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm" />
-              </div>
-              <div>
-                <label class="block text-xs font-bold text-slate-700 mb-1">地點</label>
-                <input id="ev-loc" type="text" value="美孚中心" class="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm" />
-              </div>
-            </div>
-            <div>
-              <label class="block text-xs font-bold text-slate-700 mb-1">活動類別</label>
-              <select id="ev-type" class="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm">
-                <option value="meeting">常規集會</option>
-                <option value="outdoor">戶外 / 宿營</option>
-                <option value="service">義工服務</option>
-                <option value="holiday">不用集會 / 假期</option>
-              </select>
-            </div>
-            <div class="flex justify-end gap-2 pt-2">
-              <button type="button" onclick="closeModal()" class="px-4 py-2 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-100">取消</button>
-              <button type="submit" class="px-5 py-2 rounded-xl text-xs font-extrabold bg-bgca-blue text-white">加入行事曆</button>
-            </div>
-          </form>
-        </div>
-      `);
-    }
-
-    function saveNewCalendarEvent(e) {
-      e.preventDefault();
-      state.calendarEvents.push({
-        id: 'ev_' + Date.now(),
-        date: document.getElementById('ev-date').value,
-        endDate: document.getElementById('ev-enddate').value || '',
-        time: document.getElementById('ev-time').value.trim() || '待定',
-        location: document.getElementById('ev-loc').value.trim() || '美孚中心',
-        title: document.getElementById('ev-title').value.trim(),
-        type: document.getElementById('ev-type').value
-      });
-      saveState();
-      closeModal();
-      showToast('已新增活動至共同行事曆！', 'success');
       renderApp();
     }
 
@@ -3190,31 +3232,9 @@
         <!-- Roster Filter Bar (Excel-style Filters) -->
         <div class="bg-white rounded-3xl border border-slate-200 p-4 shadow-sm mb-4 flex flex-wrap items-center justify-between gap-3">
           <div class="flex flex-wrap items-center gap-2">
-            <select onchange="state.rosterAcademicYear = this.value; state.rosterPatrolFilter='all'; state.rosterJoinYearFilter='all'; renderApp();" class="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-extrabold text-slate-700">
-              ${ACADEMIC_YEARS.map(y => `<option value="${y}" ${ay === y ? 'selected' : ''}>${y} 學年</option>`).join('')}
-              <option value="all" ${ay === 'all' ? 'selected' : ''}>所有學年</option>
-            </select>
-            <select onchange="state.rosterSectionFilter = this.value; renderApp();" class="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-extrabold text-slate-700">
-              <option value="all" ${state.rosterSectionFilter === 'all' ? 'selected' : ''}>全部支部</option>
-              <option value="scout" ${state.rosterSectionFilter === 'scout' ? 'selected' : ''}>童軍支部</option>
-              <option value="venture" ${state.rosterSectionFilter === 'venture' ? 'selected' : ''}>深資童軍支部</option>
-            </select>
-            <select onchange="state.rosterPatrolFilter = this.value; renderApp();" class="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-extrabold text-slate-700">
-              <option value="all" ${(!state.rosterPatrolFilter || state.rosterPatrolFilter === 'all') ? 'selected' : ''}>全部小隊 / 組別</option>
-              ${patrolOptions.map(p => `<option value="${escapeHtml(p)}" ${state.rosterPatrolFilter === p ? 'selected' : ''}>${escapeHtml(p)}</option>`).join('')}
-            </select>
-            <select onchange="state.rosterJoinYearFilter = this.value; renderApp();" class="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-extrabold text-slate-700">
-              <option value="all" ${(!state.rosterJoinYearFilter || state.rosterJoinYearFilter === 'all') ? 'selected' : ''}>全部入旅年份</option>
-              ${joinYearEntries.map(([yr]) => `<option value="${yr}" ${String(state.rosterJoinYearFilter) === String(yr) ? 'selected' : ''}>${yr} 年入旅</option>`).join('')}
-            </select>
-            <input type="text" value="${escapeHtml(state.rosterSearch)}" oninput="state.rosterSearch = this.value; renderApp();" placeholder="搜尋姓名、編號、職級..." class="rounded-xl border border-slate-200 px-3 py-2 text-xs w-40 sm:w-48" />
-            ${hasActiveFilters ? `
-              <button onclick="resetRosterFilters()" class="px-2.5 py-2 rounded-xl text-xs font-bold text-bgca-blue hover:bg-bgca-blueLight transition" title="重設所有篩選條件">
-                <i class="fa-solid fa-filter-circle-xmark mr-1"></i>重設
-              </button>
-            ` : ''}
-          </div>
-          <div class="flex items-center gap-2">
+            <button onclick="openBulkMemberModal()" class="px-3.5 py-2 rounded-xl border border-bgca-blue/30 bg-bgca-blueLight hover:bg-bgca-blue hover:text-white text-bgca-blue text-xs font-extrabold transition flex items-center gap-1.5">
+              <i class="fa-solid fa-file-csv"></i> 批量匯入 / 匯出
+            </button>
             <button onclick="openTrashModal()" class="px-3.5 py-2 rounded-xl border border-slate-200 bg-slate-50 hover:bg-rose-50 hover:border-rose-200 hover:text-rose-600 text-slate-600 text-xs font-extrabold transition flex items-center gap-1.5">
               <i class="fa-solid fa-trash-can-arrow-up"></i>
               臨時垃圾桶
@@ -3324,6 +3344,304 @@
       state.rosterPatrolFilter = 'all';
       state.rosterJoinYearFilter = 'all';
       state.rosterSearch = '';
+      renderApp();
+    }
+
+    // =========================================================================
+    // 11B. BULK MEMBER CSV IMPORT / EXPORT (WITH EXCEL SAMPLE & AUTO-APPROVAL)
+    // =========================================================================
+    function openBulkMemberModal() {
+      state.pendingBulkMembers = [];
+      openModal(`
+        <div class="p-6 max-h-[88vh] overflow-y-auto">
+          <div class="flex items-center justify-between mb-3">
+            <div>
+              <h3 class="text-lg font-black text-slate-900 flex items-center gap-2">
+                <i class="fa-solid fa-file-csv text-bgca-blue"></i> 批量匯入 / 匯出隊員資料
+              </h3>
+              <p class="text-xs text-slate-500 mt-0.5">用 Excel 填好範本檔案後上載，即可一次過批量新增隊員並自動批核已考獲獎章</p>
+            </div>
+            <button onclick="closeModal()" class="w-8 h-8 rounded-full hover:bg-slate-100 flex items-center justify-center text-slate-400">
+              <i class="fa-solid fa-xmark"></i>
+            </button>
+          </div>
+
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
+            <button onclick="downloadMemberCsvSample()" class="p-3.5 rounded-2xl border border-emerald-200 bg-bgca-greenLight/60 hover:bg-bgca-greenLight text-left transition">
+              <div class="text-xs font-black text-bgca-greenDark flex items-center gap-1.5">
+                <i class="fa-solid fa-file-arrow-down"></i> 步驟 1：下載空白 Excel 範本 (.csv)
+              </div>
+              <div class="text-[11px] text-slate-600 mt-1">含示範填寫格式，支援直接用 Excel 或 Numbers 打開編輯</div>
+            </button>
+            <button onclick="exportMembersCsv()" class="p-3.5 rounded-2xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-left transition">
+              <div class="text-xs font-black text-slate-800 flex items-center gap-1.5">
+                <i class="fa-solid fa-table-cells"></i> 匯出現有全旅名冊 (.csv)
+              </div>
+              <div class="text-[11px] text-slate-500 mt-1">將目前 ${state.members.length} 位隊員資料及已獲獎章匯出作紀錄或修改</div>
+            </button>
+          </div>
+
+          <div class="p-4 rounded-2xl border-2 border-dashed border-bgca-blue/40 bg-bgca-blueLight/35 text-center mb-4">
+            <input id="csv-member-input" type="file" accept=".csv,text/csv" onchange="handleMemberCsvUpload(event)" class="hidden" />
+            <label for="csv-member-input" class="cursor-pointer inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-bgca-blue hover:bg-bgca-blueDark text-white text-xs font-extrabold shadow-sm transition">
+              <i class="fa-solid fa-cloud-arrow-up"></i> 步驟 2：選擇填好嘅 CSV 檔案匯入
+            </label>
+            <p class="text-[11px] text-slate-500 mt-2">
+              欄位格式：<strong>姓名、支部(童軍/深資)、小隊或組別、職級、入旅年份、活躍學年(用 ; 分隔)、已考獲獎章(選填・用 ; 分隔)</strong>
+            </p>
+          </div>
+
+          <div id="bulk-preview-area" class="hidden space-y-3 pt-2 border-t border-slate-200">
+            <div id="bulk-preview-summary" class="text-xs font-extrabold text-bgca-greenDark"></div>
+            <div id="bulk-preview-list" class="max-h-56 overflow-y-auto space-y-1.5"></div>
+            <div class="flex justify-end gap-2 pt-2">
+              <button type="button" onclick="closeModal()" class="px-4 py-2 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-100">取消</button>
+              <button type="button" onclick="confirmBulkImportMembers()" class="px-5 py-2 rounded-xl text-xs font-extrabold bg-bgca-green hover:bg-bgca-greenDark text-white shadow-sm">
+                <i class="fa-solid fa-check mr-1"></i>確認批量匯入並自動批核
+              </button>
+            </div>
+          </div>
+        </div>
+      `, 'max-w-2xl');
+    }
+
+    function escapeCsvCell(val) {
+      const s = String(val === null || val === undefined ? '' : val);
+      if (s.includes(',') || s.includes('"') || s.includes('\n')) {
+        return '"' + s.replace(/"/g, '""') + '"';
+      }
+      return s;
+    }
+
+    function parseCsvLine(line) {
+      const result = [];
+      let cur = '';
+      let inQuotes = false;
+      for (let i = 0; i < line.length; i++) {
+        const ch = line[i];
+        if (inQuotes) {
+          if (ch === '"' && line[i + 1] === '"') {
+            cur += '"';
+            i++;
+          } else if (ch === '"') {
+            inQuotes = false;
+          } else {
+            cur += ch;
+          }
+        } else {
+          if (ch === '"') {
+            inQuotes = true;
+          } else if (ch === ',') {
+            result.push(cur.trim());
+            cur = '';
+          } else {
+            cur += ch;
+          }
+        }
+      }
+      result.push(cur.trim());
+      return result;
+    }
+
+    function downloadMemberCsvSample() {
+      const headers = ['姓名', '支部(童軍/深資)', '小隊或組別', '職級', '入旅年份', '活躍學年(用分號分隔)', '已考獲獎章(選填・用分號分隔)'];
+      const sampleRows = [
+        ['陳大文', '童軍', 'Falcon', '隊員', '2024', `2024-2025;2025-2026;${CURRENT_SEASON}`, '童軍會員章;童軍探索獎章'],
+        ['李小明', '童軍', '雄鷹小隊', '副小隊長', '2025', `2025-2026;${CURRENT_SEASON}`, '童軍會員章'],
+        ['黃志豪', '深資', 'A組', '成員', '2023', `2024-2025;2025-2026;${CURRENT_SEASON}`, '會員章;深資童軍肩章']
+      ];
+      const csv = '\uFEFF' + [headers, ...sampleRows].map(r => r.map(escapeCsvCell).join(',')).join('\r\n');
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = '1201旅_隊員批量匯入範本.csv';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      showToast('已下載 Excel 範本 (1201旅_隊員批量匯入範本.csv)', 'success');
+    }
+
+    function exportMembersCsv() {
+      const headers = ['姓名', '支部(童軍/深資)', '小隊或組別', '職級', '入旅年份', '活躍學年(用分號分隔)', '已考獲獎章(選填・用分號分隔)'];
+      const rows = state.members.map(m => {
+        const completedBadges = getBadgesForSection(m.section)
+          .filter(b => b.items.every(it => m.progress?.[it.id]?.status === 'approved'))
+          .map(b => b.name)
+          .join(';');
+        return [
+          m.name,
+          m.section === 'venture' ? '深資' : '童軍',
+          m.patrol || '',
+          m.rank || '',
+          m.joinYear || '',
+          (m.academicYears || []).join(';'),
+          completedBadges
+        ];
+      });
+      const csv = '\uFEFF' + [headers, ...rows].map(r => r.map(escapeCsvCell).join(',')).join('\r\n');
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `1201旅_隊員名冊_${new Date().toISOString().slice(0, 10)}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      showToast(`已匯出 ${state.members.length} 位隊員名冊 CSV！`, 'success');
+    }
+
+    function matchBadgesFromText(section, rawBadgeText) {
+      if (!rawBadgeText) return [];
+      const tokens = rawBadgeText.split(/[;；、,，/|]+/).map(s => s.trim()).filter(Boolean);
+      const badges = getBadgesForSection(section);
+      const matched = [];
+      tokens.forEach(tok => {
+        const found = badges.find(b => b.name === tok || b.name.includes(tok) || tok.includes(b.name.replace('童軍', '').replace('獎章', '')));
+        if (found && !matched.some(x => x.id === found.id)) {
+          matched.push(found);
+        }
+      });
+      return matched;
+    }
+
+    function handleMemberCsvUpload(e) {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        try {
+          const text = String(reader.result || '').replace(/^\uFEFF/, '');
+          const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+          if (lines.length < 2) {
+            showToast('CSV 檔案沒有資料列，請確認已填寫隊員資料', 'warning');
+            return;
+          }
+
+          const parsedList = [];
+          for (let i = 1; i < lines.length; i++) {
+            const cols = parseCsvLine(lines[i]);
+            const name = (cols[0] || '').trim();
+            if (!name) continue;
+            const secRaw = (cols[1] || '童軍').trim();
+            const section = /深資|venture/i.test(secRaw) ? 'venture' : 'scout';
+            const patrol = (cols[2] || '未分組').trim();
+            const rank = (cols[3] || '隊員').trim();
+            const joinYear = parseInt(cols[4], 10) || new Date().getFullYear();
+            const ayRaw = (cols[5] || CURRENT_SEASON).trim();
+            const academicYears = ayRaw.split(/[;；、,，]+/).map(s => s.trim()).filter(Boolean);
+            if (academicYears.length === 0) academicYears.push(CURRENT_SEASON);
+            const matchedBadges = matchBadgesFromText(section, cols[6] || '');
+            const existing = state.members.find(m => m.name.trim() === name && m.section === section);
+
+            parsedList.push({
+              name,
+              section,
+              patrol,
+              rank,
+              joinYear,
+              academicYears,
+              matchedBadges,
+              isUpdate: Boolean(existing)
+            });
+          }
+
+          if (parsedList.length === 0) {
+            showToast('未能從檔案辨識到有效隊員姓名', 'warning');
+            return;
+          }
+
+          state.pendingBulkMembers = parsedList;
+          const area = document.getElementById('bulk-preview-area');
+          const summaryEl = document.getElementById('bulk-preview-summary');
+          const listEl = document.getElementById('bulk-preview-list');
+          const newCnt = parsedList.filter(x => !x.isUpdate).length;
+          const updCnt = parsedList.filter(x => x.isUpdate).length;
+
+          area.classList.remove('hidden');
+          summaryEl.textContent = `已成功讀取 ${parsedList.length} 位隊員（新增 ${newCnt} 位・更新現有 ${updCnt} 位）：`;
+          listEl.innerHTML = parsedList.map(item => `
+            <div class="p-2.5 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between gap-2 text-xs">
+              <div class="min-w-0">
+                <div class="flex items-center gap-1.5 flex-wrap">
+                  <span class="px-1.5 py-0.5 rounded-md text-[10px] font-black ${item.isUpdate ? 'bg-amber-100 text-amber-800' : 'bg-bgca-greenLight text-bgca-greenDark'}">${item.isUpdate ? '更新' : '新增'}</span>
+                  <span class="font-black text-slate-900">${escapeHtml(item.name)}</span>
+                  <span class="text-slate-500">${SECTIONS[item.section].name}・${escapeHtml(item.patrol)}・${escapeHtml(item.rank)}・${item.joinYear}年入旅</span>
+                </div>
+                ${item.matchedBadges.length > 0 ? `
+                  <div class="text-[11px] text-bgca-blue font-bold mt-0.5">
+                    <i class="fa-solid fa-award mr-1"></i>將自動批核：${item.matchedBadges.map(b => escapeHtml(b.name)).join('、')}
+                  </div>
+                ` : ''}
+              </div>
+              <span class="text-[10px] text-slate-400 shrink-0">${escapeHtml(item.academicYears.join('、'))}</span>
+            </div>
+          `).join('');
+        } catch (err) {
+          showToast('讀取 CSV 檔案失敗，請確認格式為 UTF-8 CSV', 'error');
+        }
+      };
+      reader.readAsText(file, 'UTF-8');
+    }
+
+    function confirmBulkImportMembers() {
+      const list = state.pendingBulkMembers || [];
+      if (list.length === 0) return;
+
+      const today = new Date().toISOString().slice(0, 10);
+      let added = 0;
+      let updated = 0;
+
+      list.forEach(item => {
+        let target = state.members.find(m => m.name.trim() === item.name && m.section === item.section);
+        if (target) {
+          target.patrol = item.patrol;
+          target.rank = item.rank;
+          target.joinYear = item.joinYear;
+          target.academicYears = Array.from(new Set([...(target.academicYears || []), ...item.academicYears]));
+          if (!target.progress) target.progress = {};
+          updated++;
+        } else {
+          const prefix = item.section === 'scout' ? 'S1201-' : 'V1201-';
+          const existingNums = state.members
+            .filter(x => x.id.startsWith(prefix))
+            .map(x => parseInt(x.id.replace(prefix, ''), 10) || 0);
+          const nextNum = String((existingNums.length ? Math.max(...existingNums) : 0) + 1).padStart(2, '0');
+          target = {
+            id: prefix + nextNum,
+            name: item.name,
+            section: item.section,
+            patrol: item.patrol,
+            rank: item.rank,
+            joinYear: item.joinYear,
+            academicYears: item.academicYears,
+            rankHistory: [{ date: `${item.joinYear}-09`, rank: item.rank, note: '批量匯入初始職級' }],
+            progress: {}
+          };
+          state.members.push(target);
+          added++;
+        }
+
+        // Auto-approve all items for matched completed badges
+        item.matchedBadges.forEach(badge => {
+          badge.items.forEach(it => {
+            if (target.progress[it.id]?.status !== 'approved') {
+              target.progress[it.id] = {
+                status: 'approved',
+                date: today,
+                note: `批量匯入自動批核（${badge.name}）`
+              };
+            }
+          });
+        });
+      });
+
+      state.pendingBulkMembers = [];
+      saveState();
+      closeModal();
+      showToast(`批量匯入完成！新增 ${added} 位、更新 ${updated} 位隊員`, 'success');
       renderApp();
     }
 
