@@ -4,6 +4,9 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>1201Hub</title>
+  <meta name="description" content="1201旅團員名冊管理、Excel無亂碼批量匯入、團員入旅年份靈活補充及Excel通告排程自動對應平台。" />
+  <meta property="og:title" content="1201Hub" />
+  <meta property="og:description" content="1201旅團員名冊管理、Excel無亂碼批量匯入、團員入旅年份靈活補充及Excel通告排程自動對應平台。" />
   <!-- Tailwind CSS -->
   <script src="https://cdn.tailwindcss.com"></script>
   <!-- Font Awesome 6 -->
@@ -12,7 +15,10 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Noto+Sans+TC:wght@400;500;700;900&display=swap" rel="stylesheet" />
-  <!-- PDF.js for client-side PDF notice parsing -->
+  <!-- SheetJS (xlsx) for all Excel formats (.xlsx/.xls/.xlsm/.ods/.csv) & Vite bundled utils -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script type="module" src="/src/main.tsx"></script>
+  <!-- PDF.js for optional legacy PDF notice fallback -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
   <!-- Firebase Compat SDK (Free Spark Plan Cloud Sync) -->
   <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
@@ -193,6 +199,9 @@
     let isApplyingRemoteSnapshot = false;
 
     function isFirebaseConfigured() {
+      if (typeof window !== 'undefined' && window.location.search.includes('localtest=1')) {
+        return false;
+      }
       return Boolean(FIREBASE_CONFIG.apiKey && FIREBASE_CONFIG.projectId);
     }
 
@@ -219,7 +228,7 @@
             if (Array.isArray(remote.calendarEvents)) state.calendarEvents = remote.calendarEvents;
             if (Array.isArray(remote.trashMembers)) state.trashMembers = remote.trashMembers;
             try {
-              const { currentUser, pendingImportEvents, pendingBulkMembers, editingRankHistory, ...safeLocal } = state;
+              const { currentUser, pendingImportEvents, pendingNoticeMatrix, pendingBulkMembers, editingRankHistory, ...safeLocal } = state;
               localStorage.setItem(STORAGE_KEY, JSON.stringify(safeLocal));
             } catch (e) {}
             isApplyingRemoteSnapshot = false;
@@ -406,29 +415,9 @@
       '2030-12-26': '聖誕節後第一個周日'
     };
 
-    // Attempt background sync with HK Government 1823 Official Open Data API for future years
+    // Built-in 2026-2030 Hong Kong Public Holidays (avoid CORS error from external 1823 fetch on static hosts)
     async function syncOfficialHkHolidays() {
-      try {
-        const res = await fetch('https://www.1823.gov.hk/common/ical/tc.json');
-        if (!res.ok) return;
-        const data = await res.json();
-        const events = data?.vcalendar?.[0]?.vevent || [];
-        let updated = false;
-        events.forEach(ev => {
-          const rawDate = Array.isArray(ev.dtstart) ? ev.dtstart[0] : '';
-          const summary = ev.summary || '';
-          if (rawDate && rawDate.length === 8 && summary) {
-            const key = `${rawDate.slice(0, 4)}-${rawDate.slice(4, 6)}-${rawDate.slice(6, 8)}`;
-            if (HK_PUBLIC_HOLIDAYS[key] !== summary) {
-              HK_PUBLIC_HOLIDAYS[key] = summary;
-              updated = true;
-            }
-          }
-        });
-        if (updated && state.activeTab === 'calendar') renderApp();
-      } catch (err) {
-        // Silently fall back to built-in 2026-2030 holiday data
-      }
+      return;
     }
 
     const BADGE_DATA = {
@@ -1167,6 +1156,7 @@
         calTypeFilter: 'all',
         showHkHolidays: true,
         pendingImportEvents: [],
+        pendingNoticeMatrix: null,
         pendingBulkMembers: [],
         editingRankHistory: [],
         expandedBadgeItems: {},
@@ -1216,6 +1206,7 @@
             ...parsed,
             currentUser: sessionUser,
             pendingImportEvents: [],
+            pendingNoticeMatrix: null,
             pendingBulkMembers: [],
             editingRankHistory: [],
             expandedBadgeItems: {},
@@ -1235,7 +1226,7 @@
     function saveState() {
       try {
         // Never persist login session in localStorage so logout + F5 always stays logged out
-        const { currentUser, pendingImportEvents, pendingBulkMembers, editingRankHistory, ...toSave } = state;
+        const { currentUser, pendingImportEvents, pendingNoticeMatrix, pendingBulkMembers, editingRankHistory, ...toSave } = state;
         localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave));
       } catch (err) {
         console.warn('LocalStorage save failed:', err);
@@ -1683,7 +1674,7 @@
                 </button>
                 ${state.currentUser.role === 'admin' ? `
                   <button onclick="openPdfImportModal()" class="px-4 py-2.5 rounded-xl bg-bgca-green hover:bg-bgca-greenDark text-white font-extrabold text-xs sm:text-sm shadow-md transition flex items-center gap-2">
-                    <i class="fa-solid fa-file-arrow-up"></i> 匯入 PDF / 文字通告
+                    <i class="fa-solid fa-file-excel"></i> 匯入 Excel 通告
                   </button>
                 ` : ''}
               </div>
@@ -1727,7 +1718,7 @@
                     <i class="fa-regular fa-newspaper"></i>
                   </div>
                   <div class="text-sm font-black text-slate-800">暫未有最新旅團通告</div>
-                  <p class="text-xs text-slate-500 mt-1">管理員登入後可發佈新通告，或透過「匯入 PDF / 文字通告」自動同步最新集會排程。</p>
+                  <p class="text-xs text-slate-500 mt-1">管理員登入後可發佈新通告，或透過「匯入 Excel 通告」以表格格式自動發佈並同步行事曆。</p>
                 </div>
               ` : sortedAnns.map(ann => {
                 const tagColors = {
@@ -1736,6 +1727,7 @@
                   '物資清單': 'bg-bgca-greenLight text-bgca-greenDark',
                   '考章貼士': 'bg-purple-50 text-purple-700'
                 };
+                const hasSchedule = Array.isArray(ann.scheduleItems) && ann.scheduleItems.length > 0;
                 return `
                   <article class="bg-white rounded-3xl border ${ann.pinned ? 'border-orange-200 ring-1 ring-orange-100' : 'border-slate-200'} p-5 shadow-sm hover:shadow-md transition">
                     <div class="flex items-center justify-between gap-2 flex-wrap mb-2">
@@ -1744,9 +1736,47 @@
                         <span class="px-2.5 py-0.5 rounded-full text-[11px] font-extrabold ${tagColors[ann.tag] || 'bg-slate-100 text-slate-700'}">${escapeHtml(ann.tag)}</span>
                         <span class="text-xs font-semibold text-slate-400">${escapeHtml(ann.date)}・${escapeHtml(ann.author)}</span>
                       </div>
+                      ${hasSchedule ? `
+                        <button type="button" onclick="exportSingleAnnouncementXlsx('${ann.id}')" class="px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-bgca-blueLight text-slate-600 hover:text-bgca-blue text-[11px] font-bold transition">
+                          <i class="fa-solid fa-file-excel mr-1"></i>匯出 Excel
+                        </button>
+                      ` : ''}
                     </div>
                     <h3 class="text-base sm:text-lg font-black text-slate-900 mb-2">${escapeHtml(ann.title)}</h3>
-                    <p class="text-xs sm:text-sm text-slate-600 leading-relaxed whitespace-pre-line">${escapeHtml(ann.content)}</p>
+                    ${hasSchedule ? `
+                      ${ann.replyDeadline ? `
+                        <div class="inline-flex items-center gap-1.5 px-3 py-1 rounded-xl bg-bgca-orangeLight border border-orange-200 text-bgca-orangeDark text-xs font-extrabold mb-3">
+                          <i class="fa-regular fa-clock"></i> 交回回條截止日期：${escapeHtml(ann.replyDeadline)}
+                        </div>
+                      ` : ''}
+                      <div class="overflow-x-auto rounded-2xl border border-slate-200 mb-3">
+                        <table class="w-full text-left border-collapse text-xs">
+                          <thead>
+                            <tr class="bg-slate-50 border-b border-slate-200 text-slate-600 font-extrabold">
+                              <th class="py-2.5 px-3 whitespace-nowrap">日期</th>
+                              <th class="py-2.5 px-3 whitespace-nowrap">星期</th>
+                              <th class="py-2.5 px-3 whitespace-nowrap">時間</th>
+                              <th class="py-2.5 px-3 whitespace-nowrap">地點</th>
+                              <th class="py-2.5 px-3 min-w-[180px]">內容</th>
+                            </tr>
+                          </thead>
+                          <tbody class="divide-y divide-slate-100">
+                            ${ann.scheduleItems.map(row => `
+                              <tr class="hover:bg-slate-50/70">
+                                <td class="py-2.5 px-3 font-bold text-bgca-blue whitespace-nowrap">${escapeHtml(row.dateText || row.isoDate || '')}</td>
+                                <td class="py-2.5 px-3 text-slate-500 whitespace-nowrap">${escapeHtml(row.dayOfWeek || '—')}</td>
+                                <td class="py-2.5 px-3 font-semibold text-slate-800 whitespace-nowrap">${escapeHtml(row.time || '待定')}</td>
+                                <td class="py-2.5 px-3 text-slate-700 whitespace-nowrap">${escapeHtml(row.location || '待定')}</td>
+                                <td class="py-2.5 px-3 font-bold text-slate-900 leading-relaxed">${escapeHtml(row.content || '')}</td>
+                              </tr>
+                            `).join('')}
+                          </tbody>
+                        </table>
+                      </div>
+                      ${ann.remarks ? `<p class="text-xs text-slate-600 bg-slate-50 rounded-xl px-3 py-2 border border-slate-200 leading-relaxed whitespace-pre-line">${escapeHtml(ann.remarks)}</p>` : ''}
+                    ` : `
+                      <p class="text-xs sm:text-sm text-slate-600 leading-relaxed whitespace-pre-line">${escapeHtml(ann.content)}</p>
+                    `}
                   </article>
                 `;
               }).join('')}
@@ -1768,7 +1798,7 @@
                   return `
                     <div class="p-3 rounded-2xl border ${meta.border} bg-slate-50/70">
                       <div class="flex items-center justify-between gap-2 mb-1">
-                        <span class="text-xs font-black text-slate-800">${formatDateShort(ev.date, ev.endDate)} (${getWeekdayZh(ev.date).replace('星期', '')})</span>
+                        <span class="text-xs font-black text-slate-800">${formatDateShort(ev.date, ev.endDate)} (${ev.endDate ? `${getWeekdayZh(ev.date).replace('星期', '')}-${getWeekdayZh(ev.endDate).replace('星期', '')}` : getWeekdayZh(ev.date).replace('星期', '')})</span>
                         <span class="px-2 py-0.5 rounded-full text-[10px] font-extrabold ${meta.badgeBg} ${meta.badgeText}">${meta.label}</span>
                       </div>
                       <div class="text-xs font-bold text-slate-900">${escapeHtml(ev.title)}</div>
@@ -1834,7 +1864,7 @@
                 <i class="fa-solid fa-plus"></i> 新增活動 / 特別日子
               </button>
               <button onclick="openPdfImportModal()" class="px-3.5 py-2 rounded-xl bg-bgca-orange hover:bg-bgca-orangeDark text-white text-xs font-extrabold shadow-xs transition flex items-center gap-1.5">
-                <i class="fa-solid fa-file-arrow-up"></i> 匯入通告
+                <i class="fa-solid fa-file-excel"></i> 匯入 Excel 通告
               </button>
             ` : ''}
           </div>
@@ -2296,30 +2326,148 @@
     }
 
     // =========================================================================
-    // 8. PDF / TEXT NOTICE SMART IMPORTER
+    // 8. STRUCTURED EXCEL NOTICE IMPORTER (MATCHES OFFICIAL 日期 | 星期 | 時間/地點 | 內容)
     // =========================================================================
+    function getStandaloneTextDecoder(buffer) {
+      if (window.Scout1201Utils?.decodeTextBufferSafely) {
+        return window.Scout1201Utils.decodeTextBufferSafely(buffer);
+      }
+      const bytes = new Uint8Array(buffer);
+      if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+        return { text: new TextDecoder('utf-8').decode(bytes.subarray(3)), encoding: 'UTF-8 (BOM)' };
+      }
+      if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
+        return { text: new TextDecoder('utf-16le').decode(bytes.subarray(2)), encoding: 'UTF-16LE' };
+      }
+      if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
+        return { text: new TextDecoder('utf-16be').decode(bytes.subarray(2)), encoding: 'UTF-16BE' };
+      }
+      try {
+        return { text: new TextDecoder('utf-8', { fatal: true }).decode(bytes), encoding: 'UTF-8' };
+      } catch {
+        try {
+          const big5 = new TextDecoder('big5', { fatal: false }).decode(bytes);
+          return { text: big5, encoding: 'Big5 / CP950' };
+        } catch {
+          return { text: new TextDecoder('utf-8', { fatal: false }).decode(bytes), encoding: 'UTF-8 (Fallback)' };
+        }
+      }
+    }
+
+    function readSpreadsheetBufferUniversal(buffer, fileName) {
+      if (window.Scout1201Utils?.extractSpreadsheetMatrix) {
+        return window.Scout1201Utils.extractSpreadsheetMatrix(buffer, fileName);
+      }
+      const bytes = new Uint8Array(buffer);
+      const lower = (fileName || '').toLowerCase();
+      const isBin = /\.(xlsx|xls|xlsm|xlsb|ods)$/.test(lower) ||
+        (bytes.length >= 2 && bytes[0] === 0x50 && bytes[1] === 0x4b) ||
+        (bytes.length >= 4 && bytes[0] === 0xd0 && bytes[1] === 0xcf);
+      if (isBin && window.XLSX) {
+        const wb = window.XLSX.read(bytes, { type: 'array', cellDates: false });
+        const sheetName = wb.SheetNames[0];
+        const sheet = wb.Sheets[sheetName];
+        const rawRows = window.XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '', raw: false });
+        const rows = rawRows.map(r => r.map(c => String(c ?? '').trim())).filter(r => r.some(Boolean));
+        return { rows, detectedFormat: lower.split('.').pop()?.toUpperCase() || 'EXCEL', detectedEncoding: 'Unicode (原生 Excel)' };
+      }
+      const { text, encoding } = getStandaloneTextDecoder(buffer);
+      const lines = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n').filter(Boolean);
+      const sep = (lines[0] || '').includes('\t') ? '\t' : ',';
+      const rows = lines.map(l => sep === '\t' ? l.split('\t').map(c => c.trim()) : parseCsvLine(l));
+      return { rows, detectedFormat: 'CSV/TSV', detectedEncoding: encoding };
+    }
+
+    function classifyNoticeEventType(title, timeText) {
+      const combined = `${title || ''} ${timeText || ''}`;
+      if (/不用集會|假期|休息|考試/.test(combined)) return 'holiday';
+      if (/露營|宿營|行山|遠足|郊野/.test(combined)) return 'outdoor';
+      if (/服務|義工|探訪|馬拉松|賣旗/.test(combined)) return 'service';
+      if (/典禮|特別|中心假期/.test(combined)) return 'special';
+      return 'meeting';
+    }
+
+    function downloadNoticeTemplateXlsx() {
+      if (window.Scout1201Utils?.createNoticeTemplateWorkbook && window.Scout1201Utils?.triggerUint8ArrayDownload) {
+        const data = window.Scout1201Utils.createNoticeTemplateWorkbook();
+        window.Scout1201Utils.triggerUint8ArrayDownload(
+          data,
+          '1201旅_通告排程範本.xlsx',
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        );
+        showToast('已下載通告 Excel 範本 (1201旅_通告排程範本.xlsx)', 'success');
+        return;
+      }
+      if (!window.XLSX) {
+        showToast('Excel 引擎載入中，請稍後再試', 'warning');
+        return;
+      }
+      const headers = ['日期', '', '時間/地點', '內容'];
+      const rows = [
+        ['6/3/2027', '星期六', '14:30 - 17:00 / 學校有蓋操場', '常規集會：營藝繩結複習及背囊執拾示範'],
+        ['13-14/3/2027', '', '09:00（首日）- 16:00（次日） / 西貢麥理浩夫人度假村', '1201旅春季兩日一夜露營及原野烹飪考核'],
+        ['27/3/2027', '', '14:30 - 17:00 / 旅部活動室', '常規集會：童軍探索獎章進度檢討及步操練習']
+      ];
+      const ws = window.XLSX.utils.aoa_to_sheet([headers, ...rows]);
+      ws['!cols'] = [{ wch: 16 }, { wch: 12 }, { wch: 36 }, { wch: 46 }];
+      const wb = window.XLSX.utils.book_new();
+      window.XLSX.utils.book_append_sheet(wb, ws, '通告排程表');
+      window.XLSX.writeFile(wb, '1201旅_通告排程範本.xlsx');
+      showToast('已下載通告 Excel 範本 (1201旅_通告排程範本.xlsx)', 'success');
+    }
+
+    function exportSingleAnnouncementXlsx(annId) {
+      const ann = state.announcements.find(a => a.id === annId);
+      if (!ann || !Array.isArray(ann.scheduleItems) || ann.scheduleItems.length === 0) return;
+      if (window.Scout1201Utils?.exportNoticeToXlsx && window.Scout1201Utils?.triggerUint8ArrayDownload) {
+        const bytes = window.Scout1201Utils.exportNoticeToXlsx({
+          id: ann.id,
+          title: ann.title,
+          replyDeadline: ann.replyDeadline || '',
+          publishedAt: ann.date || '',
+          isPublishedOnHome: true,
+          remarks: ann.remarks || '',
+          items: ann.scheduleItems
+        });
+        window.Scout1201Utils.triggerUint8ArrayDownload(
+          bytes,
+          `${ann.title.slice(0, 24)}_排程表.xlsx`,
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        );
+        showToast('已匯出通告排程 Excel', 'success');
+      }
+    }
+
     function openPdfImportModal() {
       state.pendingImportEvents = [];
+      state.pendingNoticeMatrix = null;
       openModal(`
-        <div class="p-6 max-h-[88vh] overflow-y-auto">
+        <div class="p-6 max-h-[90vh] overflow-y-auto">
           <div class="flex items-center justify-between mb-4">
             <div>
-              <h3 class="text-lg font-black text-slate-900">匯入 PDF / 文字通告</h3>
-              <p class="text-xs text-slate-500">自動解析集會日期、時間、地點及內容，同步更新行事曆與首頁通告</p>
+              <h3 class="text-lg font-black text-slate-900 flex items-center gap-2">
+                <i class="fa-solid fa-file-excel text-bgca-green"></i> 匯入 Excel 通告排程表
+              </h3>
+              <p class="text-xs text-slate-500 mt-0.5">對應正式通告格式（日期｜星期｜時間/地點｜內容），自動拆分時間與地點並以整齊表格發佈</p>
             </div>
             <button onclick="closeModal()" class="w-8 h-8 rounded-full hover:bg-slate-100 flex items-center justify-center text-slate-400"><i class="fa-solid fa-xmark"></i></button>
           </div>
 
           <div class="space-y-4">
             <div class="p-4 rounded-2xl border-2 border-dashed border-bgca-blue/40 bg-bgca-blueLight/40 text-center">
-              <input id="pdf-file-input" type="file" accept=".pdf" onchange="handlePdfFileUpload(event)" class="hidden" />
-              <label for="pdf-file-input" class="cursor-pointer inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-bgca-blue hover:bg-bgca-blueDark text-white text-xs font-extrabold shadow-sm transition">
-                <i class="fa-solid fa-file-pdf"></i> 選擇旅團通告 PDF 檔案
-              </label>
-              <button type="button" onclick="loadSampleNoticeText()" class="ml-2 px-3.5 py-2.5 rounded-xl bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-bold">
-                載入 3 月露營示範文字試玩
-              </button>
-              <p id="pdf-status-text" class="text-[11px] text-slate-500 mt-2">亦可直接於下方貼上通告文字後按「智能解析排程」</p>
+              <div class="flex flex-wrap items-center justify-center gap-2">
+                <button type="button" onclick="downloadNoticeTemplateXlsx()" class="px-3.5 py-2.5 rounded-xl bg-white border border-emerald-200 hover:bg-bgca-greenLight text-bgca-greenDark text-xs font-extrabold shadow-xs transition">
+                  <i class="fa-solid fa-download mr-1.5"></i>下載通告 Excel 範本 (.xlsx)
+                </button>
+                <input id="notice-excel-input" type="file" accept=".xlsx,.xls,.xlsm,.xlsb,.ods,.csv,.tsv" onchange="handleNoticeExcelUpload(event)" class="hidden" />
+                <label for="notice-excel-input" class="cursor-pointer inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-bgca-blue hover:bg-bgca-blueDark text-white text-xs font-extrabold shadow-sm transition">
+                  <i class="fa-solid fa-file-excel"></i> 選擇通告 Excel 檔案
+                </label>
+                <button type="button" onclick="loadSampleNoticeText()" class="px-3.5 py-2.5 rounded-xl bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-bold transition">
+                  載入 3 月露營示範 Excel 試玩
+                </button>
+              </div>
+              <p id="pdf-status-text" class="text-[11px] text-slate-500 mt-2.5">支援 .xlsx / .xls / .ods / .csv（含「日期」「（空白或星期）」「時間/地點」「內容」四欄格式）或貼上 Excel 表格內容</p>
             </div>
 
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -2334,141 +2482,263 @@
             </div>
 
             <div>
-              <label class="block text-xs font-bold text-slate-700 mb-1">通告內容文字</label>
-              <textarea id="imp-raw-text" rows="5" placeholder="每行包含日期（如 13-14/3/2027）、時間、地點與活動名稱..." class="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs font-mono"></textarea>
+              <div class="flex items-center justify-between mb-1">
+                <label class="block text-xs font-bold text-slate-700">或直接從 Excel 複製貼上表格文字（自動識別 Tab / 逗號分欄）</label>
+              </div>
+              <textarea id="imp-raw-text" rows="2" placeholder="直接喺 Excel 框選「日期 / 星期 / 時間/地點 / 內容」複製貼上於此..." class="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs font-mono"></textarea>
             </div>
 
-            <div class="flex items-center justify-between gap-2">
+            <div>
+              <label class="block text-xs font-bold text-slate-700 mb-1">附加備註（選填，將顯示於通告表格下方）</label>
+              <input id="imp-remarks" type="text" placeholder="例如：請隊員穿著整齊童軍制服準時出席，如未能出席請預早請假。" class="w-full rounded-xl border border-slate-200 px-3 py-2 text-xs" />
+            </div>
+
+            <div class="flex flex-wrap items-center justify-between gap-2">
               <label class="inline-flex items-center gap-2 text-xs font-bold text-slate-700 cursor-pointer">
                 <input id="imp-create-ann" type="checkbox" checked class="accent-bgca-orange" />
-                同時於首頁自動發佈最新通告
+                同時於首頁以整齊排程表發佈最新通告
               </label>
               <button type="button" onclick="parseNoticeText()" class="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-900 text-white text-xs font-extrabold">
-                <i class="fa-solid fa-wand-magic-sparkles mr-1.5"></i>智能解析排程
+                <i class="fa-solid fa-table-columns mr-1.5"></i>解析貼上表格
               </button>
             </div>
 
-            <div id="imp-preview-area" class="hidden space-y-2 pt-2 border-t border-slate-200">
-              <div class="text-xs font-extrabold text-bgca-greenDark flex items-center justify-between">
-                <span id="imp-preview-count"></span>
+            <div id="imp-preview-area" class="hidden space-y-3 pt-3 border-t border-slate-200">
+              <div class="flex flex-wrap items-center justify-between gap-2">
+                <span id="imp-preview-count" class="text-xs font-extrabold text-bgca-greenDark"></span>
+                <span id="imp-format-badge" class="px-2.5 py-0.5 rounded-full bg-bgca-blueLight text-bgca-blue text-[11px] font-bold hidden"></span>
               </div>
-              <div id="imp-preview-list" class="max-h-48 overflow-y-auto space-y-1.5"></div>
-              <div class="flex justify-end gap-2 pt-2">
+
+              <!-- Column Mapping Override Controls -->
+              <div id="imp-col-mapping" class="hidden p-3 rounded-2xl bg-slate-50 border border-slate-200">
+                <div class="text-[11px] font-extrabold text-slate-700 mb-2"><i class="fa-solid fa-sliders mr-1 text-bgca-blue"></i>欄位對應調整（如自動辨識有偏差可手動微調）：</div>
+                <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
+                  <div>
+                    <label class="block font-bold text-slate-500 mb-0.5">日期欄</label>
+                    <select id="map-date-col" onchange="reapplyNoticeMapping()" class="w-full rounded-lg border border-slate-200 bg-white px-2 py-1"></select>
+                  </div>
+                  <div>
+                    <label class="block font-bold text-slate-500 mb-0.5">星期欄（可無）</label>
+                    <select id="map-day-col" onchange="reapplyNoticeMapping()" class="w-full rounded-lg border border-slate-200 bg-white px-2 py-1"></select>
+                  </div>
+                  <div>
+                    <label class="block font-bold text-slate-500 mb-0.5">時間/地點合欄</label>
+                    <select id="map-timeloc-col" onchange="reapplyNoticeMapping()" class="w-full rounded-lg border border-slate-200 bg-white px-2 py-1"></select>
+                  </div>
+                  <div>
+                    <label class="block font-bold text-slate-500 mb-0.5">內容欄</label>
+                    <select id="map-content-col" onchange="reapplyNoticeMapping()" class="w-full rounded-lg border border-slate-200 bg-white px-2 py-1"></select>
+                  </div>
+                </div>
+              </div>
+
+              <div class="overflow-x-auto rounded-2xl border border-slate-200 max-h-48 overflow-y-auto">
+                <table class="w-full text-left border-collapse text-xs">
+                  <thead class="sticky top-0 bg-slate-100 z-10">
+                    <tr class="border-b border-slate-200 text-slate-700 font-extrabold">
+                      <th class="py-2 px-2.5 whitespace-nowrap">日期</th>
+                      <th class="py-2 px-2.5 whitespace-nowrap">星期</th>
+                      <th class="py-2 px-2.5 whitespace-nowrap">時間</th>
+                      <th class="py-2 px-2.5 whitespace-nowrap">地點</th>
+                      <th class="py-2 px-2.5 min-w-[160px]">內容</th>
+                      <th class="py-2 px-2.5 whitespace-nowrap">活動分類</th>
+                    </tr>
+                  </thead>
+                  <tbody id="imp-preview-list" class="divide-y divide-slate-100 bg-white"></tbody>
+                </table>
+              </div>
+
+              <div class="flex justify-end gap-2 pt-1">
                 <button type="button" onclick="closeModal()" class="px-4 py-2 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-100">取消</button>
                 <button type="button" onclick="confirmImportNotice()" class="px-5 py-2 rounded-xl text-xs font-extrabold bg-bgca-green hover:bg-bgca-greenDark text-white shadow-sm">
-                  <i class="fa-solid fa-check mr-1"></i>確認匯入並更新行事曆
+                  <i class="fa-solid fa-check mr-1"></i>確認匯入並發佈排程表
                 </button>
               </div>
             </div>
           </div>
         </div>
-      `, 'max-w-2xl');
+      `, 'max-w-4xl');
+    }
+
+    function renderNoticePreviewTable(items, detectedFormatLabel) {
+      state.pendingImportEvents = items.map((it, idx) => ({
+        id: it.id || `imp_${Date.now()}_${idx}`,
+        dateText: it.dateText || '',
+        date: it.isoDate || new Date().toISOString().slice(0, 10),
+        endDate: it.endIsoDate || '',
+        dayOfWeek: it.dayOfWeek || '—',
+        time: it.time || '待定',
+        location: it.location || '待定',
+        title: it.content || '旅團集會活動',
+        type: classifyNoticeEventType(it.content, it.time)
+      }));
+
+      const area = document.getElementById('imp-preview-area');
+      const listEl = document.getElementById('imp-preview-list');
+      const countEl = document.getElementById('imp-preview-count');
+      const badgeEl = document.getElementById('imp-format-badge');
+
+      if (state.pendingImportEvents.length === 0) {
+        area.classList.add('hidden');
+        showToast('未能解析出有效通告排程列，請檢查表格欄位或格式', 'warning');
+        return;
+      }
+
+      area.classList.remove('hidden');
+      countEl.textContent = `已自動對應 ${state.pendingImportEvents.length} 項排程（可直接於表格內微調後匯入）：`;
+      if (detectedFormatLabel && badgeEl) {
+        badgeEl.textContent = `偵測格式：${detectedFormatLabel}`;
+        badgeEl.classList.remove('hidden');
+      }
+
+      listEl.innerHTML = state.pendingImportEvents.map((ev, idx) => `
+        <tr class="hover:bg-slate-50/70">
+          <td class="py-1.5 px-2 whitespace-nowrap">
+            <input type="text" value="${escapeHtml(ev.dateText || ev.date)}" onchange="state.pendingImportEvents[${idx}].dateText=this.value" class="w-28 rounded-lg border border-slate-200 px-2 py-1 text-xs font-bold text-bgca-blue" />
+          </td>
+          <td class="py-1.5 px-2 whitespace-nowrap">
+            <input type="text" value="${escapeHtml(ev.dayOfWeek)}" onchange="state.pendingImportEvents[${idx}].dayOfWeek=this.value" class="w-20 rounded-lg border border-slate-200 px-2 py-1 text-xs text-slate-600" />
+          </td>
+          <td class="py-1.5 px-2 whitespace-nowrap">
+            <input type="text" value="${escapeHtml(ev.time)}" onchange="state.pendingImportEvents[${idx}].time=this.value" class="w-40 rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold" />
+          </td>
+          <td class="py-1.5 px-2 whitespace-nowrap">
+            <input type="text" value="${escapeHtml(ev.location)}" onchange="state.pendingImportEvents[${idx}].location=this.value" class="w-44 rounded-lg border border-slate-200 px-2 py-1 text-xs" />
+          </td>
+          <td class="py-1.5 px-2">
+            <input type="text" value="${escapeHtml(ev.title)}" onchange="state.pendingImportEvents[${idx}].title=this.value" class="w-full min-w-[180px] rounded-lg border border-slate-200 px-2 py-1 text-xs font-bold text-slate-900" />
+          </td>
+          <td class="py-1.5 px-2 whitespace-nowrap">
+            <select onchange="state.pendingImportEvents[${idx}].type=this.value" class="rounded-lg border border-slate-200 px-2 py-1 text-xs font-bold">
+              ${Object.entries(EVENT_TYPES).map(([k, m]) => `<option value="${k}" ${ev.type === k ? 'selected' : ''}>${m.label}</option>`).join('')}
+            </select>
+          </td>
+        </tr>
+      `).join('');
+    }
+
+    function populateNoticeMappingSelectors(rows, mapping, headerRowIndex) {
+      const mapBox = document.getElementById('imp-col-mapping');
+      if (!mapBox || !rows || rows.length === 0) return;
+      const sampleHeaderRow = headerRowIndex >= 0 ? rows[headerRowIndex] : rows[0];
+      const maxCols = Math.max(...rows.slice(0, 5).map(r => r.length), 4);
+      const colOpts = Array.from({ length: maxCols }, (_, idx) => {
+        const label = sampleHeaderRow[idx] ? `第${idx + 1}欄 (${sampleHeaderRow[idx]})` : `第${idx + 1}欄 (空白)`;
+        return `<option value="${idx}">${escapeHtml(label)}</option>`;
+      }).join('');
+
+      const fillSel = (id, val, allowNone) => {
+        const sel = document.getElementById(id);
+        if (!sel) return;
+        sel.innerHTML = (allowNone ? '<option value="">（不使用）</option>' : '') + colOpts;
+        sel.value = val === null || val === undefined ? '' : String(val);
+      };
+
+      fillSel('map-date-col', mapping.dateCol, false);
+      fillSel('map-day-col', mapping.dayCol, true);
+      fillSel('map-timeloc-col', mapping.timeLocationCol ?? mapping.timeCol, true);
+      fillSel('map-content-col', mapping.contentCol, false);
+      mapBox.classList.remove('hidden');
+    }
+
+    function reapplyNoticeMapping() {
+      const ctx = state.pendingNoticeMatrix;
+      if (!ctx || !window.Scout1201Utils?.buildNoticeItemsFromMatrix) return;
+      const dateCol = parseInt(document.getElementById('map-date-col').value, 10) || 0;
+      const dayVal = document.getElementById('map-day-col').value;
+      const tlVal = document.getElementById('map-timeloc-col').value;
+      const contentCol = parseInt(document.getElementById('map-content-col').value, 10) || 0;
+      const mapping = {
+        dateCol,
+        dayCol: dayVal === '' ? null : parseInt(dayVal, 10),
+        timeLocationCol: tlVal === '' ? null : parseInt(tlVal, 10),
+        timeCol: null,
+        locationCol: null,
+        contentCol
+      };
+      const items = window.Scout1201Utils.buildNoticeItemsFromMatrix(ctx.rows, mapping, ctx.headerRowIndex);
+      renderNoticePreviewTable(items, ctx.detectedFormat);
     }
 
     function loadSampleNoticeText() {
       document.getElementById('imp-title').value = '【2027年3月 - 4月】1201 旅露營及春季集會通告';
       document.getElementById('imp-deadline').value = '2027年3月5日';
-      document.getElementById('imp-raw-text').value =
-`6/3/2027 六 下午2:30-4:30 地點:美孚中心 營前物資檢查及紮營練習
-13-14/3/2027 六、日 早上9:00-翌日4:00 地點:大潭童軍中心 兩日一夜春季露營及原野烹飪
-20/3/2027 六 不用集會 露營後休息周 - 不用集會
-27/3/2027 六 下午2:30-4:30 地點:美孚中心 地圖指南針實習及進度章考核
-3/4/2027 六 早上9:30-下午1:00 地點:美孚社區 復活節長者探訪義工服務`;
+      document.getElementById('imp-remarks').value = '請隊員穿著整齊童軍制服準時出席；露營活動需於截止日期前交回簽妥之家長回條。';
+      const demoMatrix = window.Scout1201Utils?.DEMO_NOTICE_MATRIX || [
+        ['日期', '', '時間/地點', '內容'],
+        ['6/3/2027', '', '14:30 - 17:00 / 學校有蓋操場', '常規集會：營藝繩結複習及背囊執拾示範'],
+        ['13-14/3/2027', '', '09:00（首日） - 16:00（次日） / 西貢麥理浩夫人度假村營地', '1201旅春季兩日一夜露營及原野烹飪考核'],
+        ['27/3/2027', '', '14:30 - 17:00 / 旅部活動室', '常規集會：童軍探索獎章進度檢討及步操練習'],
+        ['10/4/2027', '', '09:30 - 13:00 / 城門水塘郊野公園', '旅團遠足訓練：地圖閱讀及指南針定位實習']
+      ];
+      document.getElementById('imp-raw-text').value = demoMatrix.map(r => r.join('\t')).join('\n');
       parseNoticeText();
     }
 
-    async function handlePdfFileUpload(e) {
+    async function handleNoticeExcelUpload(e) {
       const file = e.target.files?.[0];
       if (!file) return;
       const statusEl = document.getElementById('pdf-status-text');
       statusEl.textContent = `正在讀取 ${file.name}...`;
       try {
-        if (window.pdfjsLib) {
-          pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-          const buf = await file.arrayBuffer();
-          const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
-          let fullText = '';
-          for (let p = 1; p <= pdf.numPages; p++) {
-            const page = await pdf.getPage(p);
-            const content = await page.getTextContent();
-            fullText += content.items.map(it => it.str).join(' ') + '\n';
-          }
-          document.getElementById('imp-raw-text').value = fullText;
-          document.getElementById('imp-title').value = file.name.replace(/\.pdf$/i, '');
-          statusEl.textContent = `已成功讀取 ${pdf.numPages} 頁內容，請檢視並按「智能解析排程」！`;
-          parseNoticeText();
+        const buffer = await file.arrayBuffer();
+        if (window.Scout1201Utils?.parseNoticeExcelBuffer) {
+          const res = window.Scout1201Utils.parseNoticeExcelBuffer(buffer, file.name);
+          const { mapping, headerRowIndex } = window.Scout1201Utils.detectNoticeColumnMapping(res.rawRows);
+          state.pendingNoticeMatrix = { rows: res.rawRows, headerRowIndex, detectedFormat: res.detectedFormat };
+          document.getElementById('imp-title').value = file.name.replace(/\.(xlsx|xls|xlsm|xlsb|ods|csv|tsv)$/i, '');
+          document.getElementById('imp-raw-text').value = res.rawRows.map(r => r.join('\t')).join('\n');
+          populateNoticeMappingSelectors(res.rawRows, mapping, headerRowIndex);
+          renderNoticePreviewTable(res.items, `${res.detectedFormat}（原生表格）`);
+          statusEl.textContent = `已讀取 ${file.name}（${res.detectedFormat}），共對應 ${res.items.length} 項排程。`;
         } else {
-          statusEl.textContent = 'PDF 引擎載入中，請直接貼上通告文字進行解析。';
+          const { rows, detectedFormat } = readSpreadsheetBufferUniversal(buffer, file.name);
+          document.getElementById('imp-title').value = file.name.replace(/\.(xlsx|xls|xlsm|xlsb|ods|csv|tsv)$/i, '');
+          document.getElementById('imp-raw-text').value = rows.map(r => r.join('\t')).join('\n');
+          parseNoticeText(detectedFormat);
         }
       } catch (err) {
-        statusEl.textContent = '未能自動讀取此 PDF，建議直接複製通告文字貼於下方。';
+        statusEl.textContent = '未能讀取此檔案，請確認是否為有效 Excel (.xlsx/.xls/.csv) 檔案。';
+        showToast('讀取通告 Excel 失敗', 'error');
       }
     }
 
-    function parseNoticeText() {
+    function parseNoticeText(overrideFormatLabel) {
       const raw = document.getElementById('imp-raw-text')?.value || '';
-      const lines = raw.split(/\n+/).map(l => l.trim()).filter(Boolean);
-      const parsed = [];
-      const dateRegex = /(\d{1,2})(?:-(\d{1,2}))?\/(\d{1,2})\/(\d{4})/;
-
-      lines.forEach((line, idx) => {
-        const m = line.match(dateRegex);
-        if (!m) return;
-        const d1 = String(m[1]).padStart(2, '0');
-        const d2 = m[2] ? String(m[2]).padStart(2, '0') : '';
-        const mon = String(m[3]).padStart(2, '0');
-        const yr = m[4];
-        const date = `${yr}-${mon}-${d1}`;
-        const endDate = d2 ? `${yr}-${mon}-${d2}` : '';
-
-        const timeMatch = line.match(/(早上|上午|下午|晚上)?\s*\d{1,2}:\d{2}\s*[-–至]\s*(早上|上午|下午|晚上|翌日)?\s*\d{1,2}:\d{2}/);
-        const locMatch = line.match(/地點[:：]\s*([^\s]+)/);
-        const time = timeMatch ? timeMatch[0] : (line.includes('不用集會') ? '全日' : '下午 2:30 - 4:30');
-        const location = locMatch ? locMatch[1] : (line.includes('不用集會') ? '—' : '美孚中心');
-
-        let title = line
-          .replace(dateRegex, '')
-          .replace(/(?:星期)?[一二三四五六日]、?[一二三四五六日]?/g, '')
-          .replace(timeMatch ? timeMatch[0] : '', '')
-          .replace(locMatch ? locMatch[0] : '', '')
-          .replace(/\s+/g, ' ')
-          .trim();
-        if (!title) title = '旅團集會活動';
-
-        let type = 'meeting';
-        if (/不用集會|假期|休息|考試/.test(title)) type = 'holiday';
-        else if (/露營|宿營|行山|遠足|郊野/.test(title)) type = 'outdoor';
-        else if (/服務|義工|探訪|馬拉松|賣旗/.test(title)) type = 'service';
-
-        parsed.push({ id: `imp_${Date.now()}_${idx}`, date, endDate, time, location, title, type });
-      });
-
-      state.pendingImportEvents = parsed;
-      const area = document.getElementById('imp-preview-area');
-      const listEl = document.getElementById('imp-preview-list');
-      const countEl = document.getElementById('imp-preview-count');
-
-      if (parsed.length === 0) {
-        area.classList.add('hidden');
-        showToast('未偵測到「日/月/年」格式日期，請檢查文字格式', 'warning');
+      if (!raw.trim()) {
+        showToast('請先選擇通告 Excel 檔案或貼上表格內容', 'warning');
         return;
       }
-
-      area.classList.remove('hidden');
-      countEl.textContent = `已成功辨識 ${parsed.length} 項排程（確認後即會寫入共同行事曆）：`;
-      listEl.innerHTML = parsed.map(ev => {
-        const meta = EVENT_TYPES[ev.type];
-        return `
-          <div class="p-2.5 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between gap-2 text-xs">
-            <div class="min-w-0">
-              <span class="font-mono font-bold text-bgca-blue mr-1.5">${ev.date}${ev.endDate ? '~' + ev.endDate.slice(8) : ''}</span>
-              <span class="font-bold text-slate-900">${escapeHtml(ev.title)}</span>
-              <div class="text-[11px] text-slate-500">${escapeHtml(ev.time)}・${escapeHtml(ev.location)}</div>
-            </div>
-            <span class="px-2 py-0.5 rounded-full text-[10px] font-extrabold shrink-0 ${meta.badgeBg} ${meta.badgeText}">${meta.label}</span>
-          </div>
-        `;
-      }).join('');
+      if (window.Scout1201Utils?.parseNoticeTableText) {
+        const res = window.Scout1201Utils.parseNoticeTableText(raw);
+        const { mapping, headerRowIndex } = window.Scout1201Utils.detectNoticeColumnMapping(res.rawRows);
+        state.pendingNoticeMatrix = { rows: res.rawRows, headerRowIndex, detectedFormat: overrideFormatLabel || res.detectedFormat };
+        populateNoticeMappingSelectors(res.rawRows, mapping, headerRowIndex);
+        renderNoticePreviewTable(res.items, overrideFormatLabel || res.detectedFormat);
+        return;
+      }
+      // Standalone fallback parser if external bundle unavailable
+      const lines = raw.split(/\n+/).map(l => l.trim()).filter(Boolean);
+      const items = [];
+      lines.forEach((line, idx) => {
+        const cols = line.split(/\t+/).map(c => c.trim());
+        if (idx === 0 && /日期/.test(cols[0] || '')) return;
+        const dateRaw = cols[0] || '';
+        const dayRaw = cols.length >= 4 ? cols[1] : '';
+        const tlRaw = cols.length >= 4 ? cols[2] : (cols[1] || '');
+        const contentRaw = cols.length >= 4 ? cols[3] : (cols[2] || line);
+        const tlParts = tlRaw.split(/\s*[\/／|]\s*/);
+        items.push({
+          id: `imp_${Date.now()}_${idx}`,
+          dateText: dateRaw,
+          isoDate: new Date().toISOString().slice(0, 10),
+          dayOfWeek: dayRaw || '—',
+          time: tlParts[0] || '待定',
+          location: tlParts[1] || '待定',
+          content: contentRaw
+        });
+      });
+      renderNoticePreviewTable(items, overrideFormatLabel || '表格文字');
     }
 
     function confirmImportNotice() {
@@ -2477,17 +2747,36 @@
 
       const noticeTitle = document.getElementById('imp-title')?.value.trim() || '1201 旅最新通告排程';
       const replyDeadline = document.getElementById('imp-deadline')?.value.trim() || '';
+      const remarks = document.getElementById('imp-remarks')?.value.trim() || '';
       const createAnn = document.getElementById('imp-create-ann')?.checked;
 
-      parsed.forEach(ev => state.calendarEvents.push(ev));
+      parsed.forEach(ev => {
+        state.calendarEvents.push({
+          id: ev.id,
+          date: ev.date,
+          endDate: ev.endDate || '',
+          time: ev.time || '待定',
+          location: ev.location || '待定',
+          title: ev.title,
+          type: ev.type || 'meeting'
+        });
+      });
 
       if (createAnn) {
-        const highlights = parsed
-          .filter(e => e.type !== 'holiday')
-          .slice(0, 6)
-          .map(e => `${formatDateShort(e.date, e.endDate)} ${e.title}`)
+        const scheduleItems = parsed.map(ev => ({
+          id: ev.id,
+          dateText: ev.dateText || ev.date,
+          isoDate: ev.date,
+          endIsoDate: ev.endDate || '',
+          dayOfWeek: ev.dayOfWeek || '—',
+          time: ev.time || '待定',
+          location: ev.location || '待定',
+          content: ev.title
+        }));
+        const highlights = scheduleItems
+          .slice(0, 5)
+          .map(s => `${s.dateText} (${s.time}・${s.location}) ${s.content}`)
           .join('；');
-        const summaryText = `已匯入共 ${parsed.length} 項最新集會及活動排程並同步至「共同行事曆」。重點活動包括：${highlights || '詳見共同行事曆'}。${replyDeadline ? `請於 ${replyDeadline} 前交回出席回條給領袖團隊。` : ''}`;
 
         state.announcements.unshift({
           id: 'ann_' + Date.now(),
@@ -2497,21 +2786,24 @@
           date: new Date().toISOString().slice(0, 10),
           author: '管理員',
           pinned: true,
-          content: summaryText
+          replyDeadline,
+          remarks,
+          scheduleItems,
+          content: highlights || `共 ${scheduleItems.length} 項旅團排程（詳見排程表）`
         });
       }
 
-      // Jump calendar to first imported event's month
-      const firstDate = parsed[0].date.split('-').map(Number);
-      if (firstDate.length === 3) {
+      const firstDate = (parsed[0].date || '').split('-').map(Number);
+      if (firstDate.length === 3 && !isNaN(firstDate[0]) && !isNaN(firstDate[1])) {
         state.calYear = firstDate[0];
         state.calMonth = firstDate[1] - 1;
       }
 
       state.pendingImportEvents = [];
+      state.pendingNoticeMatrix = null;
       saveState();
       closeModal();
-      showToast(`已成功匯入 ${parsed.length} 項排程並更新行事曆！`, 'success');
+      showToast(`已成功匯入 ${parsed.length} 項排程並以表格發佈！`, 'success');
       renderApp();
     }
 
@@ -2800,7 +3092,7 @@
                 </div>
                 <div class="text-xs text-slate-500 mt-1.5 flex flex-wrap gap-x-4 gap-y-1">
                   <span><i class="fa-solid fa-id-card mr-1 text-slate-400"></i>編號：<strong>${member.id}</strong></span>
-                  <span><i class="fa-solid fa-calendar-check mr-1 text-bgca-orange"></i>入旅年份：<strong>${member.joinYear} 年</strong></span>
+                  <span><i class="fa-solid fa-calendar-check mr-1 text-bgca-orange"></i>入旅年份：<strong>${member.joinYear ? `${member.joinYear} 年` : '待補充'}</strong></span>
                   <span><i class="fa-solid fa-graduation-cap mr-1 text-bgca-blue"></i>活躍學年：${member.academicYears.join('、')}</span>
                   <button onclick="openSetMemberPasswordModal('${member.id}', false)" class="text-bgca-blue hover:underline font-bold">
                     <i class="fa-solid fa-key mr-1"></i>${member.passHash ? '更改密碼' : '設定個人密碼'}
@@ -3018,7 +3310,7 @@
           </div>
           <div class="flex flex-wrap gap-2">
             <button onclick="openPdfImportModal()" class="px-3.5 py-2 rounded-xl bg-bgca-orange hover:bg-bgca-orangeDark text-white text-xs font-extrabold shadow-xs transition">
-              <i class="fa-solid fa-file-pdf mr-1"></i>匯入通告
+              <i class="fa-solid fa-file-excel mr-1"></i>匯入 Excel 通告
             </button>
             <button onclick="exportBackupJSON()" class="px-3.5 py-2 rounded-xl bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-bold">
               <i class="fa-solid fa-download mr-1"></i>備份資料
@@ -3150,23 +3442,40 @@
       const scoutCnt = yearMembers.filter(m => m.section === 'scout').length;
       const ventureCnt = yearMembers.filter(m => m.section === 'venture').length;
 
-      // Join year breakdown & unique filter options for Excel-like dropdowns
+      // Join year breakdown (handle missing/optional joinYear cleanly under 'missing')
       const joinYearMap = {};
       const patrolSet = new Set();
       yearMembers.forEach(m => {
-        joinYearMap[m.joinYear] = (joinYearMap[m.joinYear] || 0) + 1;
+        const jyKey = m.joinYear ? String(m.joinYear) : 'missing';
+        joinYearMap[jyKey] = (joinYearMap[jyKey] || 0) + 1;
         if (m.patrol) patrolSet.add(m.patrol);
       });
-      const joinYearEntries = Object.entries(joinYearMap).sort((a, b) => b[0] - a[0]);
+      const joinYearEntries = Object.entries(joinYearMap).sort((a, b) => {
+        if (a[0] === 'missing') return 1;
+        if (b[0] === 'missing') return -1;
+        return Number(b[0]) - Number(a[0]);
+      });
       const patrolOptions = Array.from(patrolSet).sort((a, b) => a.localeCompare(b, 'zh-HK'));
 
       const filtered = yearMembers.filter(m => {
         if (state.rosterSectionFilter !== 'all' && m.section !== state.rosterSectionFilter) return false;
         if (state.rosterPatrolFilter && state.rosterPatrolFilter !== 'all' && m.patrol !== state.rosterPatrolFilter) return false;
-        if (state.rosterJoinYearFilter && state.rosterJoinYearFilter !== 'all' && String(m.joinYear) !== String(state.rosterJoinYearFilter)) return false;
+        if (state.rosterJoinYearFilter && state.rosterJoinYearFilter !== 'all') {
+          if (state.rosterJoinYearFilter === 'missing') {
+            if (m.joinYear) return false;
+          } else if (String(m.joinYear || '') !== String(state.rosterJoinYearFilter)) {
+            return false;
+          }
+        }
         if (state.rosterSearch) {
           const q = state.rosterSearch.toLowerCase();
-          return m.name.toLowerCase().includes(q) || m.id.toLowerCase().includes(q) || m.patrol.toLowerCase().includes(q) || m.rank.toLowerCase().includes(q) || String(m.joinYear).includes(q);
+          return (
+            m.name.toLowerCase().includes(q) ||
+            m.id.toLowerCase().includes(q) ||
+            (m.patrol || '').toLowerCase().includes(q) ||
+            (m.rank || '').toLowerCase().includes(q) ||
+            String(m.joinYear || '待補充').toLowerCase().includes(q)
+          );
         }
         return true;
       });
@@ -3181,7 +3490,11 @@
           const bKey = `${b.section}_${b.patrol}_${b.rank}`;
           return aKey.localeCompare(bKey, 'zh-HK') * dir;
         }
-        if (sortBy === 'joinYear') return (a.joinYear - b.joinYear) * dir;
+        if (sortBy === 'joinYear') {
+          const av = a.joinYear ? Number(a.joinYear) : 0;
+          const bv = b.joinYear ? Number(b.joinYear) : 0;
+          return (av - bv) * dir;
+        }
         if (sortBy === 'academicYears') return ((a.academicYears?.length || 0) - (b.academicYears?.length || 0)) * dir;
         if (sortBy === 'progress') return (getMemberStats(a).percent - getMemberStats(b).percent) * dir;
         return a.id.localeCompare(b.id) * dir;
@@ -3213,15 +3526,16 @@
 
           <div class="lg:col-span-8 bg-white rounded-3xl border border-slate-200 p-5 shadow-sm">
             <div class="text-xs font-extrabold text-slate-500 mb-2.5 flex items-center gap-1.5">
-              <i class="fa-solid fa-chart-simple text-bgca-orange"></i> 按「入旅年份」人數統計（點擊年份可快速篩選）
+              <i class="fa-solid fa-chart-simple text-bgca-orange"></i> 按「入旅年份」人數統計（點擊年份可快速篩選・可留空後補）
             </div>
             <div class="flex flex-wrap gap-2">
-              ${joinYearEntries.map(([yr, cnt]) => {
+              ${joinYearEntries.length === 0 ? '<span class="text-xs text-slate-400">暫無隊員資料</span>' : joinYearEntries.map(([yr, cnt]) => {
                 const isSelected = String(state.rosterJoinYearFilter) === String(yr);
+                const isMissing = yr === 'missing';
                 return `
-                  <button onclick="state.rosterJoinYearFilter = '${isSelected ? 'all' : yr}'; renderApp();" class="px-3.5 py-2 rounded-2xl border transition flex items-center gap-2 ${isSelected ? 'bg-bgca-orangeLight border-bgca-orange ring-1 ring-bgca-orange' : 'bg-slate-50 border-slate-200 hover:bg-slate-100'}">
-                    <span class="text-xs font-black text-slate-700">${yr} 年入旅</span>
-                    <span class="px-2 py-0.5 rounded-full bg-bgca-orange text-white text-xs font-black">${cnt} 人</span>
+                  <button onclick="state.rosterJoinYearFilter = '${isSelected ? 'all' : yr}'; renderApp();" class="px-3.5 py-2 rounded-2xl border transition flex items-center gap-2 ${isSelected ? 'bg-bgca-orangeLight border-bgca-orange ring-1 ring-bgca-orange' : isMissing ? 'bg-amber-50/80 border-amber-200 hover:bg-amber-100/70' : 'bg-slate-50 border-slate-200 hover:bg-slate-100'}">
+                    <span class="text-xs font-black ${isMissing ? 'text-amber-800' : 'text-slate-700'}">${isMissing ? '待補充入旅年份' : `${yr} 年入旅`}</span>
+                    <span class="px-2 py-0.5 rounded-full ${isMissing ? 'bg-amber-500' : 'bg-bgca-orange'} text-white text-xs font-black">${cnt} 人</span>
                   </button>
                 `;
               }).join('')}
@@ -3229,11 +3543,34 @@
           </div>
         </div>
 
-        <!-- Roster Filter Bar (Excel-style Filters) -->
+        <!-- Roster Filter Bar (Excel-style Filters & Actions) -->
         <div class="bg-white rounded-3xl border border-slate-200 p-4 shadow-sm mb-4 flex flex-wrap items-center justify-between gap-3">
+          <div class="flex flex-wrap items-center gap-2 flex-1 min-w-[260px]">
+            <input type="text" value="${escapeHtml(state.rosterSearch || '')}" oninput="state.rosterSearch=this.value; renderApp();" placeholder="搜尋姓名、編號、小隊..." class="rounded-xl border border-slate-200 px-3 py-2 text-xs w-full sm:w-52 focus:outline-none focus:ring-2 focus:ring-bgca-blue" />
+            <select onchange="state.rosterAcademicYear=this.value; renderApp();" class="rounded-xl border border-slate-200 px-2.5 py-2 text-xs font-bold bg-slate-50">
+              <option value="all" ${ay === 'all' ? 'selected' : ''}>全部學年</option>
+              ${ACADEMIC_YEARS.map(y => `<option value="${y}" ${ay === y ? 'selected' : ''}>${y} 學年</option>`).join('')}
+            </select>
+            <select onchange="state.rosterSectionFilter=this.value; renderApp();" class="rounded-xl border border-slate-200 px-2.5 py-2 text-xs font-bold bg-slate-50">
+              <option value="all" ${state.rosterSectionFilter === 'all' ? 'selected' : ''}>全部支部</option>
+              <option value="scout" ${state.rosterSectionFilter === 'scout' ? 'selected' : ''}>童軍支部</option>
+              <option value="venture" ${state.rosterSectionFilter === 'venture' ? 'selected' : ''}>深資童軍支部</option>
+            </select>
+            ${patrolOptions.length > 0 ? `
+              <select onchange="state.rosterPatrolFilter=this.value; renderApp();" class="rounded-xl border border-slate-200 px-2.5 py-2 text-xs font-bold bg-slate-50">
+                <option value="all" ${state.rosterPatrolFilter === 'all' ? 'selected' : ''}>全部小隊</option>
+                ${patrolOptions.map(p => `<option value="${escapeHtml(p)}" ${state.rosterPatrolFilter === p ? 'selected' : ''}>${escapeHtml(p)}</option>`).join('')}
+              </select>
+            ` : ''}
+            ${hasActiveFilters ? `
+              <button onclick="resetRosterFilters()" class="px-2.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-600 text-xs font-bold">
+                重設
+              </button>
+            ` : ''}
+          </div>
           <div class="flex flex-wrap items-center gap-2">
             <button onclick="openBulkMemberModal()" class="px-3.5 py-2 rounded-xl border border-bgca-blue/30 bg-bgca-blueLight hover:bg-bgca-blue hover:text-white text-bgca-blue text-xs font-extrabold transition flex items-center gap-1.5">
-              <i class="fa-solid fa-file-csv"></i> 批量匯入 / 匯出
+              <i class="fa-solid fa-file-excel"></i> 批量匯入 Excel / 匯出
             </button>
             <button onclick="openTrashModal()" class="px-3.5 py-2 rounded-xl border border-slate-200 bg-slate-50 hover:bg-rose-50 hover:border-rose-200 hover:text-rose-600 text-slate-600 text-xs font-extrabold transition flex items-center gap-1.5">
               <i class="fa-solid fa-trash-can-arrow-up"></i>
@@ -3296,7 +3633,16 @@
                         </div>
                       </td>
                       <td class="py-3.5 px-4 whitespace-nowrap">
-                        <span class="px-2.5 py-1 rounded-lg bg-bgca-orangeLight text-bgca-orangeDark text-xs font-black">${m.joinYear} 年</span>
+                        ${m.joinYear ? `
+                          <span class="px-2.5 py-1 rounded-lg bg-bgca-orangeLight text-bgca-orangeDark text-xs font-black">${m.joinYear} 年</span>
+                        ` : `
+                          <div class="inline-flex items-center gap-1.5">
+                            <span class="px-2.5 py-1 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-xs font-extrabold">待補充</span>
+                            <button onclick="openQuickJoinYearModal('${m.id}')" class="px-2 py-1 rounded-lg bg-bgca-blueLight hover:bg-bgca-blue text-bgca-blue hover:text-white text-[11px] font-extrabold transition" title="補填 ${escapeHtml(m.name)} 的入旅年份">
+                              補填
+                            </button>
+                          </div>
+                        `}
                       </td>
                       <td class="py-3.5 px-4 text-xs text-slate-600">${m.academicYears.join('、')}</td>
                       <td class="py-3.5 px-4 min-w-[140px]">
@@ -3329,6 +3675,43 @@
       `;
     }
 
+    function openQuickJoinYearModal(memberId) {
+      const m = state.members.find(x => x.id === memberId);
+      if (!m) return;
+      openModal(`
+        <div class="p-6">
+          <div class="flex items-center justify-between mb-3">
+            <h3 class="text-base font-black text-slate-900">補充「${escapeHtml(m.name)}」入旅年份</h3>
+            <button onclick="closeModal()" class="w-8 h-8 rounded-full hover:bg-slate-100 flex items-center justify-center text-slate-400"><i class="fa-solid fa-xmark"></i></button>
+          </div>
+          <form onsubmit="saveQuickJoinYear(event, '${memberId}')" class="space-y-3.5">
+            <div>
+              <label class="block text-xs font-bold text-slate-700 mb-1">入旅年份（留空即保持「待補充」）</label>
+              <input id="quick-joinyear" type="number" min="2010" max="2035" value="${m.joinYear || ''}" placeholder="例如：2025" class="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-bgca-blue" />
+            </div>
+            <div class="flex justify-end gap-2">
+              <button type="button" onclick="closeModal()" class="px-4 py-2 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-100">取消</button>
+              <button type="submit" class="px-5 py-2 rounded-xl text-xs font-extrabold bg-bgca-blue hover:bg-bgca-blueDark text-white">儲存年份</button>
+            </div>
+          </form>
+        </div>
+      `, 'max-w-xs');
+      setTimeout(() => document.getElementById('quick-joinyear')?.focus(), 50);
+    }
+
+    function saveQuickJoinYear(e, memberId) {
+      e.preventDefault();
+      const m = state.members.find(x => x.id === memberId);
+      if (!m) return;
+      const raw = document.getElementById('quick-joinyear')?.value.trim() || '';
+      const yr = raw ? parseInt(raw, 10) : null;
+      m.joinYear = Number.isFinite(yr) ? yr : null;
+      saveState();
+      closeModal();
+      showToast(m.joinYear ? `已為「${m.name}」補充入旅年份 (${m.joinYear} 年)` : `已將「${m.name}」設為待補充`, 'success');
+      renderApp();
+    }
+
     function toggleRosterSort(col) {
       if (state.rosterSortBy === col) {
         state.rosterSortDir = state.rosterSortDir === 'asc' ? 'desc' : 'asc';
@@ -3348,7 +3731,7 @@
     }
 
     // =========================================================================
-    // 11B. BULK MEMBER CSV IMPORT / EXPORT (WITH EXCEL SAMPLE & AUTO-APPROVAL)
+    // 11B. UNIVERSAL EXCEL MEMBER IMPORT / EXPORT (NO CSV GARBLE, OPTIONAL JOIN YEAR)
     // =========================================================================
     function openBulkMemberModal() {
       state.pendingBulkMembers = [];
@@ -3357,9 +3740,9 @@
           <div class="flex items-center justify-between mb-3">
             <div>
               <h3 class="text-lg font-black text-slate-900 flex items-center gap-2">
-                <i class="fa-solid fa-file-csv text-bgca-blue"></i> 批量匯入 / 匯出隊員資料
+                <i class="fa-solid fa-file-excel text-bgca-green"></i> 批量匯入 / 匯出 Excel 隊員名冊
               </h3>
-              <p class="text-xs text-slate-500 mt-0.5">用 Excel 填好範本檔案後上載，即可一次過批量新增隊員並自動批核已考獲獎章</p>
+              <p class="text-xs text-slate-500 mt-0.5">採用原生 Excel (.xlsx) 格式，徹底解決 CSV 中文變「?」亂碼問題；入旅年份可留空日後補填</p>
             </div>
             <button onclick="closeModal()" class="w-8 h-8 rounded-full hover:bg-slate-100 flex items-center justify-center text-slate-400">
               <i class="fa-solid fa-xmark"></i>
@@ -3369,25 +3752,25 @@
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
             <button onclick="downloadMemberCsvSample()" class="p-3.5 rounded-2xl border border-emerald-200 bg-bgca-greenLight/60 hover:bg-bgca-greenLight text-left transition">
               <div class="text-xs font-black text-bgca-greenDark flex items-center gap-1.5">
-                <i class="fa-solid fa-file-arrow-down"></i> 步驟 1：下載空白 Excel 範本 (.csv)
+                <i class="fa-solid fa-file-arrow-down"></i> 步驟 1：下載 Excel 範本 (.xlsx)
               </div>
-              <div class="text-[11px] text-slate-600 mt-1">含示範填寫格式，支援直接用 Excel 或 Numbers 打開編輯</div>
+              <div class="text-[11px] text-slate-600 mt-1">原生 Excel Unicode 格式，直接儲存不會遺失字元或出現亂碼</div>
             </button>
             <button onclick="exportMembersCsv()" class="p-3.5 rounded-2xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-left transition">
               <div class="text-xs font-black text-slate-800 flex items-center gap-1.5">
-                <i class="fa-solid fa-table-cells"></i> 匯出現有全旅名冊 (.csv)
+                <i class="fa-solid fa-table-cells"></i> 匯出現有全旅名冊 (.xlsx)
               </div>
-              <div class="text-[11px] text-slate-500 mt-1">將目前 ${state.members.length} 位隊員資料及已獲獎章匯出作紀錄或修改</div>
+              <div class="text-[11px] text-slate-500 mt-1">將目前 ${state.members.length} 位隊員資料及已獲獎章匯出為 Excel</div>
             </button>
           </div>
 
           <div class="p-4 rounded-2xl border-2 border-dashed border-bgca-blue/40 bg-bgca-blueLight/35 text-center mb-4">
-            <input id="csv-member-input" type="file" accept=".csv,text/csv" onchange="handleMemberCsvUpload(event)" class="hidden" />
+            <input id="csv-member-input" type="file" accept=".xlsx,.xls,.xlsm,.xlsb,.ods,.csv,.tsv" onchange="handleMemberCsvUpload(event)" class="hidden" />
             <label for="csv-member-input" class="cursor-pointer inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-bgca-blue hover:bg-bgca-blueDark text-white text-xs font-extrabold shadow-sm transition">
-              <i class="fa-solid fa-cloud-arrow-up"></i> 步驟 2：選擇填好嘅 CSV 檔案匯入
+              <i class="fa-solid fa-cloud-arrow-up"></i> 步驟 2：選擇 Excel / 試算表檔案匯入
             </label>
-            <p class="text-[11px] text-slate-500 mt-2">
-              欄位格式：<strong>姓名、支部(童軍/深資)、小隊或組別、職級、入旅年份、活躍學年(用 ; 分隔)、已考獲獎章(選填・用 ; 分隔)</strong>
+            <p id="bulk-file-status" class="text-[11px] text-slate-500 mt-2">
+              支援所有試算表格式（<strong>.xlsx / .xls / .xlsm / .ods / .csv</strong>）及自動 Big5/UTF-8 解碼；僅「<strong>姓名</strong>」必填，入旅年份可留空
             </p>
           </div>
 
@@ -3444,27 +3827,40 @@
     }
 
     function downloadMemberCsvSample() {
-      const headers = ['姓名', '支部(童軍/深資)', '小隊或組別', '職級', '入旅年份', '活躍學年(用分號分隔)', '已考獲獎章(選填・用分號分隔)'];
+      if (window.Scout1201Utils?.createMemberTemplateWorkbook && window.Scout1201Utils?.triggerUint8ArrayDownload) {
+        const bytes = window.Scout1201Utils.createMemberTemplateWorkbook();
+        window.Scout1201Utils.triggerUint8ArrayDownload(
+          bytes,
+          '1201旅_隊員批量匯入範本.xlsx',
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        );
+        showToast('已下載原生 Excel 範本 (1201旅_隊員批量匯入範本.xlsx)', 'success');
+        return;
+      }
+      if (!window.XLSX) {
+        showToast('Excel 引擎載入中，請稍後再試', 'warning');
+        return;
+      }
+      const headers = ['姓名', '支部(童軍/深資)', '小隊或組別', '職級', '入旅年份(選填)', '活躍學年(用分號分隔)', '已考獲獎章(選填・用分號分隔)'];
       const sampleRows = [
-        ['陳大文', '童軍', 'Falcon', '隊員', '2024', `2024-2025;2025-2026;${CURRENT_SEASON}`, '童軍會員章;童軍探索獎章'],
-        ['李小明', '童軍', '雄鷹小隊', '副小隊長', '2025', `2025-2026;${CURRENT_SEASON}`, '童軍會員章'],
-        ['黃志豪', '深資', 'A組', '成員', '2023', `2024-2025;2025-2026;${CURRENT_SEASON}`, '會員章;深資童軍肩章']
+        ['陳大文', '童軍', 'Falcon小隊', '隊員', '2024', `2024-2025;2025-2026;${CURRENT_SEASON}`, '童軍會員章;童軍探索獎章'],
+        ['江鎮宇', '童軍', 'Lion小隊', '隊員', '', `${CURRENT_SEASON}`, '童軍會員章'],
+        ['黃志豪', '深資', 'N/A', '成員', '2023', `2024-2025;2025-2026;${CURRENT_SEASON}`, '會員章;深資童軍肩章']
       ];
-      const csv = '\uFEFF' + [headers, ...sampleRows].map(r => r.map(escapeCsvCell).join(',')).join('\r\n');
-      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = '1201旅_隊員批量匯入範本.csv';
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
-      showToast('已下載 Excel 範本 (1201旅_隊員批量匯入範本.csv)', 'success');
+      const ws = window.XLSX.utils.aoa_to_sheet([headers, ...sampleRows]);
+      ws['!cols'] = [{ wch: 14 }, { wch: 18 }, { wch: 16 }, { wch: 10 }, { wch: 16 }, { wch: 28 }, { wch: 32 }];
+      const wb = window.XLSX.utils.book_new();
+      window.XLSX.utils.book_append_sheet(wb, ws, '團員匯入名冊');
+      window.XLSX.writeFile(wb, '1201旅_隊員批量匯入範本.xlsx');
+      showToast('已下載原生 Excel 範本 (1201旅_隊員批量匯入範本.xlsx)', 'success');
     }
 
     function exportMembersCsv() {
-      const headers = ['姓名', '支部(童軍/深資)', '小隊或組別', '職級', '入旅年份', '活躍學年(用分號分隔)', '已考獲獎章(選填・用分號分隔)'];
+      if (!window.XLSX) {
+        showToast('Excel 引擎載入中，請稍後再試', 'warning');
+        return;
+      }
+      const headers = ['姓名', '支部(童軍/深資)', '小隊或組別', '職級', '入旅年份(選填)', '活躍學年(用分號分隔)', '已考獲獎章(選填・用分號分隔)'];
       const rows = state.members.map(m => {
         const completedBadges = getBadgesForSection(m.section)
           .filter(b => b.items.every(it => m.progress?.[it.id]?.status === 'approved'))
@@ -3475,22 +3871,17 @@
           m.section === 'venture' ? '深資' : '童軍',
           m.patrol || '',
           m.rank || '',
-          m.joinYear || '',
+          m.joinYear ?? '',
           (m.academicYears || []).join(';'),
           completedBadges
         ];
       });
-      const csv = '\uFEFF' + [headers, ...rows].map(r => r.map(escapeCsvCell).join(',')).join('\r\n');
-      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `1201旅_隊員名冊_${new Date().toISOString().slice(0, 10)}.csv`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
-      showToast(`已匯出 ${state.members.length} 位隊員名冊 CSV！`, 'success');
+      const ws = window.XLSX.utils.aoa_to_sheet([headers, ...rows]);
+      ws['!cols'] = [{ wch: 14 }, { wch: 18 }, { wch: 16 }, { wch: 10 }, { wch: 16 }, { wch: 28 }, { wch: 32 }];
+      const wb = window.XLSX.utils.book_new();
+      window.XLSX.utils.book_append_sheet(wb, ws, '1201旅團員名冊');
+      window.XLSX.writeFile(wb, `1201旅_隊員名冊_${new Date().toISOString().slice(0, 10)}.xlsx`);
+      showToast(`已匯出 ${state.members.length} 位隊員名冊 Excel！`, 'success');
     }
 
     function matchBadgesFromText(section, rawBadgeText) {
@@ -3507,35 +3898,60 @@
       return matched;
     }
 
-    function handleMemberCsvUpload(e) {
+    async function handleMemberCsvUpload(e) {
       const file = e.target.files?.[0];
       if (!file) return;
-      const reader = new FileReader();
-      reader.onload = () => {
-        try {
-          const text = String(reader.result || '').replace(/^\uFEFF/, '');
-          const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-          if (lines.length < 2) {
-            showToast('CSV 檔案沒有資料列，請確認已填寫隊員資料', 'warning');
-            return;
-          }
+      const statusEl = document.getElementById('bulk-file-status');
+      if (statusEl) statusEl.textContent = `正在解析 ${file.name}...`;
+      try {
+        const buffer = await file.arrayBuffer();
+        let parsedList = [];
+        let detectedFormat = '';
+        let detectedEncoding = '';
 
-          const parsedList = [];
-          for (let i = 1; i < lines.length; i++) {
-            const cols = parseCsvLine(lines[i]);
+        if (window.Scout1201Utils?.importMembersFromBuffer) {
+          const res = window.Scout1201Utils.importMembersFromBuffer(buffer, file.name);
+          detectedFormat = res.detectedFormat;
+          detectedEncoding = res.detectedEncoding;
+          parsedList = res.rows.map(r => {
+            const section = r.section === '深資' ? 'venture' : 'scout';
+            const joinYear = r.joinYear ? parseInt(r.joinYear, 10) : null;
+            const academicYears = r.activeYears.length > 0 ? r.activeYears : [CURRENT_SEASON];
+            const matchedBadges = matchBadgesFromText(section, r.badges.join(';'));
+            const existing = state.members.find(m => m.name.trim() === r.name && m.section === section);
+            return {
+              name: r.name,
+              section,
+              patrol: r.patrol,
+              rank: r.rank,
+              joinYear: Number.isFinite(joinYear) ? joinYear : null,
+              academicYears,
+              matchedBadges,
+              warnings: r.warnings || [],
+              isUpdate: Boolean(existing)
+            };
+          });
+        } else {
+          const matrixRes = readSpreadsheetBufferUniversal(buffer, file.name);
+          detectedFormat = matrixRes.detectedFormat;
+          detectedEncoding = matrixRes.detectedEncoding;
+          const rows = matrixRes.rows;
+          for (let i = 1; i < rows.length; i++) {
+            const cols = rows[i];
             const name = (cols[0] || '').trim();
             if (!name) continue;
             const secRaw = (cols[1] || '童軍').trim();
             const section = /深資|venture/i.test(secRaw) ? 'venture' : 'scout';
-            const patrol = (cols[2] || '未分組').trim();
+            const patrol = (cols[2] || '未分組').replace(/\?+$/g, '').trim() || '未分組';
             const rank = (cols[3] || '隊員').trim();
-            const joinYear = parseInt(cols[4], 10) || new Date().getFullYear();
+            const rawJy = (cols[4] || '').trim();
+            const yrMatch = rawJy.match(/(19|20)\d{2}/);
+            const joinYear = yrMatch ? parseInt(yrMatch[0], 10) : null;
             const ayRaw = (cols[5] || CURRENT_SEASON).trim();
             const academicYears = ayRaw.split(/[;；、,，]+/).map(s => s.trim()).filter(Boolean);
             if (academicYears.length === 0) academicYears.push(CURRENT_SEASON);
             const matchedBadges = matchBadgesFromText(section, cols[6] || '');
             const existing = state.members.find(m => m.name.trim() === name && m.section === section);
-
             parsedList.push({
               name,
               section,
@@ -3544,46 +3960,51 @@
               joinYear,
               academicYears,
               matchedBadges,
+              warnings: [],
               isUpdate: Boolean(existing)
             });
           }
-
-          if (parsedList.length === 0) {
-            showToast('未能從檔案辨識到有效隊員姓名', 'warning');
-            return;
-          }
-
-          state.pendingBulkMembers = parsedList;
-          const area = document.getElementById('bulk-preview-area');
-          const summaryEl = document.getElementById('bulk-preview-summary');
-          const listEl = document.getElementById('bulk-preview-list');
-          const newCnt = parsedList.filter(x => !x.isUpdate).length;
-          const updCnt = parsedList.filter(x => x.isUpdate).length;
-
-          area.classList.remove('hidden');
-          summaryEl.textContent = `已成功讀取 ${parsedList.length} 位隊員（新增 ${newCnt} 位・更新現有 ${updCnt} 位）：`;
-          listEl.innerHTML = parsedList.map(item => `
-            <div class="p-2.5 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between gap-2 text-xs">
-              <div class="min-w-0">
-                <div class="flex items-center gap-1.5 flex-wrap">
-                  <span class="px-1.5 py-0.5 rounded-md text-[10px] font-black ${item.isUpdate ? 'bg-amber-100 text-amber-800' : 'bg-bgca-greenLight text-bgca-greenDark'}">${item.isUpdate ? '更新' : '新增'}</span>
-                  <span class="font-black text-slate-900">${escapeHtml(item.name)}</span>
-                  <span class="text-slate-500">${SECTIONS[item.section].name}・${escapeHtml(item.patrol)}・${escapeHtml(item.rank)}・${item.joinYear}年入旅</span>
-                </div>
-                ${item.matchedBadges.length > 0 ? `
-                  <div class="text-[11px] text-bgca-blue font-bold mt-0.5">
-                    <i class="fa-solid fa-award mr-1"></i>將自動批核：${item.matchedBadges.map(b => escapeHtml(b.name)).join('、')}
-                  </div>
-                ` : ''}
-              </div>
-              <span class="text-[10px] text-slate-400 shrink-0">${escapeHtml(item.academicYears.join('、'))}</span>
-            </div>
-          `).join('');
-        } catch (err) {
-          showToast('讀取 CSV 檔案失敗，請確認格式為 UTF-8 CSV', 'error');
         }
-      };
-      reader.readAsText(file, 'UTF-8');
+
+        if (parsedList.length === 0) {
+          showToast('未能從檔案辨識到有效隊員姓名，請確認第一欄為隊員姓名', 'warning');
+          return;
+        }
+
+        state.pendingBulkMembers = parsedList;
+        const area = document.getElementById('bulk-preview-area');
+        const summaryEl = document.getElementById('bulk-preview-summary');
+        const listEl = document.getElementById('bulk-preview-list');
+        const newCnt = parsedList.filter(x => !x.isUpdate).length;
+        const updCnt = parsedList.filter(x => x.isUpdate).length;
+        const missingJyCnt = parsedList.filter(x => !x.joinYear).length;
+
+        if (statusEl) {
+          statusEl.textContent = `已讀取 ${file.name}（格式：${detectedFormat}・編碼：${detectedEncoding}）`;
+        }
+
+        area.classList.remove('hidden');
+        summaryEl.textContent = `已成功讀取 ${parsedList.length} 位隊員（新增 ${newCnt} 位・更新 ${updCnt} 位${missingJyCnt > 0 ? `・${missingJyCnt} 位入旅年份待補充` : ''}）：`;
+        listEl.innerHTML = parsedList.map(item => `
+          <div class="p-2.5 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between gap-2 text-xs">
+            <div class="min-w-0">
+              <div class="flex items-center gap-1.5 flex-wrap">
+                <span class="px-1.5 py-0.5 rounded-md text-[10px] font-black ${item.isUpdate ? 'bg-amber-100 text-amber-800' : 'bg-bgca-greenLight text-bgca-greenDark'}">${item.isUpdate ? '更新' : '新增'}</span>
+                <span class="font-black text-slate-900">${escapeHtml(item.name)}</span>
+                <span class="text-slate-500">${SECTIONS[item.section].name}・${escapeHtml(item.patrol)}・${escapeHtml(item.rank)}・${item.joinYear ? `${item.joinYear}年入旅` : '<span class="text-amber-700 font-bold">入旅年份待補充</span>'}</span>
+              </div>
+              ${item.matchedBadges.length > 0 ? `
+                <div class="text-[11px] text-bgca-blue font-bold mt-0.5">
+                  <i class="fa-solid fa-award mr-1"></i>將自動批核：${item.matchedBadges.map(b => escapeHtml(b.name)).join('、')}
+                </div>
+              ` : ''}
+            </div>
+            <span class="text-[10px] text-slate-400 shrink-0">${escapeHtml(item.academicYears.join('、'))}</span>
+          </div>
+        `).join('');
+      } catch (err) {
+        showToast('讀取試算表檔案失敗，請確認格式為 .xlsx / .xls / .csv', 'error');
+      }
     }
 
     function confirmBulkImportMembers() {
@@ -3591,6 +4012,7 @@
       if (list.length === 0) return;
 
       const today = new Date().toISOString().slice(0, 10);
+      const currentMonth = today.slice(0, 7);
       let added = 0;
       let updated = 0;
 
@@ -3599,7 +4021,9 @@
         if (target) {
           target.patrol = item.patrol;
           target.rank = item.rank;
-          target.joinYear = item.joinYear;
+          if (item.joinYear !== null && item.joinYear !== undefined) {
+            target.joinYear = item.joinYear;
+          }
           target.academicYears = Array.from(new Set([...(target.academicYears || []), ...item.academicYears]));
           if (!target.progress) target.progress = {};
           updated++;
@@ -3615,9 +4039,9 @@
             section: item.section,
             patrol: item.patrol,
             rank: item.rank,
-            joinYear: item.joinYear,
+            joinYear: item.joinYear ?? null,
             academicYears: item.academicYears,
-            rankHistory: [{ date: `${item.joinYear}-09`, rank: item.rank, note: '批量匯入初始職級' }],
+            rankHistory: [{ date: item.joinYear ? `${item.joinYear}-09` : currentMonth, rank: item.rank, note: '批量匯入初始職級' }],
             progress: {}
           };
           state.members.push(target);
@@ -3764,8 +4188,8 @@
               </div>
             </div>
             <div>
-              <label class="block text-xs font-bold text-slate-700 mb-1">入旅年份 *</label>
-              <input id="mf-joinyear" required type="number" min="2015" max="2030" value="${m?.joinYear || 2026}" class="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm" />
+              <label class="block text-xs font-bold text-slate-700 mb-1">入旅年份（選填，可留空日後再補填）</label>
+              <input id="mf-joinyear" type="number" min="2010" max="2035" value="${m?.joinYear ?? ''}" placeholder="可留空，先新增隊員姓名再補填" class="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm" />
             </div>
             <div>
               <label class="block text-xs font-bold text-slate-700 mb-1.5">所屬活躍學年（可複選）</label>
@@ -3815,7 +4239,9 @@
       const section = document.getElementById('mf-section').value;
       const patrol = document.getElementById('mf-patrol').value.trim() || '未分組';
       const rank = document.getElementById('mf-rank').value.trim() || '隊員';
-      const joinYear = parseInt(document.getElementById('mf-joinyear').value, 10) || 2026;
+      const rawJoinYear = document.getElementById('mf-joinyear').value.trim();
+      const parsedJoinYear = rawJoinYear ? parseInt(rawJoinYear, 10) : null;
+      const joinYear = Number.isFinite(parsedJoinYear) ? parsedJoinYear : null;
       const academicYears = Array.from(document.querySelectorAll('input[name="mf-ay"]:checked')).map(cb => cb.value);
       if (academicYears.length === 0) academicYears.push(ACADEMIC_YEARS[0]);
 
@@ -3840,10 +4266,13 @@
         showToast(`已更新隊員「${name}」資料及職級歷程`, 'success');
       } else {
         if (historyCopy.length === 0) {
-          historyCopy.push({ date: `${joinYear}-09`, rank: rank, note: '入旅初始職級' });
+          historyCopy.push({ date: joinYear ? `${joinYear}-09` : todayMonth, rank: rank, note: '入旅初始職級' });
         }
         const prefix = section === 'scout' ? 'S1201-' : 'V1201-';
-        const nextNum = String(state.members.filter(x => x.section === section).length + 1).padStart(2, '0');
+        const existingNums = state.members
+          .filter(x => x.id.startsWith(prefix))
+          .map(x => parseInt(x.id.replace(prefix, ''), 10) || 0);
+        const nextNum = String((existingNums.length ? Math.max(...existingNums) : 0) + 1).padStart(2, '0');
         state.members.push({
           id: prefix + nextNum,
           name,
@@ -4080,7 +4509,7 @@
                   <span class="text-xs font-bold text-slate-500">${escapeHtml(m.patrol)}・${escapeHtml(m.rank)}</span>
                 </div>
                 <div class="text-[11px] text-slate-400 mt-0.5">
-                  編號：${m.id}・入旅年份：${m.joinYear} 年・總進度：<strong class="text-bgca-blue">${stats.approved}/${stats.total} 項 (${stats.percent}%)</strong>
+                  編號：${m.id}・入旅年份：${m.joinYear ? `${m.joinYear} 年` : '待補充'}・總進度：<strong class="text-bgca-blue">${stats.approved}/${stats.total} 項 (${stats.percent}%)</strong>
                 </div>
               </div>
             </div>
@@ -4198,7 +4627,10 @@
 
     function renderAdminAnnouncements() {
       return `
-        <div class="flex justify-end mb-4">
+        <div class="flex justify-end gap-2 mb-4">
+          <button onclick="openPdfImportModal()" class="px-4 py-2 rounded-xl bg-bgca-orange hover:bg-bgca-orangeDark text-white text-xs font-extrabold shadow-sm">
+            <i class="fa-solid fa-file-excel mr-1.5"></i>匯入 Excel 通告
+          </button>
           <button onclick="openAnnouncementModal()" class="px-4 py-2 rounded-xl bg-bgca-blue hover:bg-bgca-blueDark text-white text-xs font-extrabold shadow-sm">
             <i class="fa-solid fa-plus mr-1.5"></i>發佈新通告
           </button>
@@ -4207,8 +4639,9 @@
           ${state.announcements.map(ann => `
             <div class="bg-white rounded-2xl border border-slate-200 p-4 shadow-xs flex items-start justify-between gap-4">
               <div>
-                <div class="flex items-center gap-2 mb-1">
+                <div class="flex items-center gap-2 mb-1 flex-wrap">
                   <span class="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-slate-100 text-slate-700">${escapeHtml(ann.tag)}</span>
+                  ${Array.isArray(ann.scheduleItems) && ann.scheduleItems.length > 0 ? `<span class="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-bgca-greenLight text-bgca-greenDark">排程表格 (${ann.scheduleItems.length}項)</span>` : ''}
                   <span class="text-xs text-slate-400">${escapeHtml(ann.date)}・${escapeHtml(ann.author)}</span>
                 </div>
                 <div class="text-sm font-black text-slate-900">${escapeHtml(ann.title)}</div>
